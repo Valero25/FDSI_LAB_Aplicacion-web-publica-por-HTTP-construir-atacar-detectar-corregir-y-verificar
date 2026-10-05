@@ -1,0 +1,13 @@
+# Instalar: sudo install -m 644 deploy/fail2ban/jail-muvautomation.local /etc/fail2ban/jail.d/muvautomation.local
+# Bloqueo en el firewall (persiste mas alla del bloqueo en memoria de la app). Agregar a ignoreip
+# la IP del administrador para no autobloquearse.
+[muvautomation]
+enabled   = true
+filter    = muvautomation
+logpath   = /var/log/muvautomation/actions.log
+port      = 443
+banaction = ufw
+maxretry  = 10
+findtime  = 10m
+bantime   = 1h
+ignoreip  = 127.0.0.1/8

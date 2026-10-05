@@ -35,6 +35,7 @@ ALERT = {
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "alerts.db")
+    main._auth_failures.clear()  # el bloqueo por IP no debe filtrarse entre pruebas
     with TestClient(main.app) as c:
         yield c
 
@@ -212,3 +213,85 @@ def test_abuseipdb_failure_does_not_block_classification(monkeypatch):
     score, classification, enriched = enrichment.classify({**ALERT, "source_ip": "203.0.114.12"})
     assert (score, classification) == (60, "media")
     assert enriched["abuseipdb"]["status"] == "error"
+
+
+# --- Anti fuerza bruta y cabeceras ------------------------------------------------
+
+
+def test_bruteforce_lockout_blocks_even_valid_key(client, monkeypatch):
+    monkeypatch.setattr(main, "_auth_failures", {})
+    for _ in range(main.MAX_AUTH_FAILURES):
+        assert client.get("/alerts", headers={"X-Analyst-Key": "x" * 20}).status_code == 401
+    r = client.get("/alerts", headers=ANA)
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+
+
+def test_api_responses_are_not_cacheable_and_have_security_headers(client):
+    r = client.get("/")
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+
+
+def test_acknowledge_does_not_downgrade_escalated_alert(client):
+    alert_id = create(client, severity="critical", tactic="Exfiltration", technique="T1041 - Exfiltration Over C2 Channel")
+    client.post(f"/alerts/{alert_id}/actions", json={"action": "acknowledge"}, headers=JUAN)
+    assert client.get(f"/alerts/{alert_id}", headers=JUAN).json()["status"] == "escalated"
+
+
+# --- Claves, ids y tabla de bloqueos ------------------------------------------------
+
+
+def test_invalid_alert_id_is_rejected(client):
+    assert client.get("/alerts/not-a-uuid", headers=JUAN).status_code == 422
+    assert client.get("/alerts/..%2F..%2Fetc%2Fpasswd", headers=JUAN).status_code in (404, 422)
+    ok = create(client)
+    assert client.get(f"/alerts/{ok}", headers=JUAN).status_code == 200
+
+
+def test_duplicate_analyst_keys_rejected():
+    with pytest.raises(ValueError):
+        main.load_analysts("a:lector:clave-compartida-123456;b:respondedor:clave-compartida-123456")
+
+
+def test_lockout_table_evicts_oldest_not_everything(monkeypatch):
+    monkeypatch.setattr(main, "_auth_failures", {f"10.{i // 65000}.{i % 250}.{i // 250 % 250}": [1.0] for i in range(10_000)})
+    first = next(iter(main._auth_failures))
+
+    class Req:
+        client = type("C", (), {"host": "203.0.113.9"})()
+
+    main._register_failure(Req())
+    assert len(main._auth_failures) == 10_000
+    assert first not in main._auth_failures and "203.0.113.9" in main._auth_failures
+
+
+# --- Cuotas y base de datos -----------------------------------------------------------
+
+
+def test_alert_quota(client, monkeypatch):
+    monkeypatch.setattr(main, "MAX_ALERTS", 3)  # el arranque ya siembra 3 alertas
+    assert client.post("/alerts", json=ALERT, headers=EMISOR).status_code == 507
+
+
+def test_action_quota(client, monkeypatch):
+    monkeypatch.setattr(main, "MAX_ACTIONS_PER_ALERT", 2)
+    alert_id = create(client)
+    body = {"action": "comment", "note": "x"}
+    codes = [client.post(f"/alerts/{alert_id}/actions", json=body, headers=ANA).status_code for _ in range(3)]
+    assert codes == [201, 201, 409]
+
+
+def test_db_uses_wal_and_foreign_keys(client):
+    with main.get_db() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_data_and_log_dirs_come_from_env(tmp_path):
+    import subprocess, sys
+    code = "import app.main as m; print(m.DB_PATH, m.LOG_DIR)"
+    env = {**os.environ, "MUV_DATA_DIR": str(tmp_path / "d"), "MUV_LOG_DIR": str(tmp_path / "l")}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True).stdout
+    assert str(tmp_path / "d" / "alerts.db") in out and (tmp_path / "l").is_dir()

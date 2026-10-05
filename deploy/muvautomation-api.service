@@ -5,19 +5,30 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/fdsi-lab3
-Environment=PYTHONUNBUFFERED=1
-# MUV_API_KEY vive fuera del repositorio (root:www-data, 640). Ver deploy/muvautomation.env.example.
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+# El codigo (/opt/fdsi-lab3) queda de SOLO LECTURA: la DB y los logs viven en directorios que
+# systemd crea con el dueno correcto (StateDirectory / LogsDirectory).
+Environment=MUV_DATA_DIR=/var/lib/muvautomation MUV_LOG_DIR=/var/log/muvautomation
+# systemd lee este archivo como root: puede ser 0600 root:root (el servicio no necesita leerlo).
+# Ver deploy/muvautomation.env.example.
 EnvironmentFile=/etc/muvautomation.env
-ExecStart=/opt/fdsi-lab3/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
+# --workers 1: el bloqueo anti fuerza bruta vive en la memoria del proceso.
+ExecStart=/opt/fdsi-lab3/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --limit-concurrency 100 --timeout-keep-alive 5 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header
 Restart=on-failure
-User=www-data
-Group=www-data
+RestartSec=3
+# Usuario de sistema dedicado (no el www-data de Nginx). Se crea con deploy/harden-host.sh.
+User=muvapi
+Group=muvapi
 UMask=0027
+StateDirectory=muvautomation
+StateDirectoryMode=0750
+LogsDirectory=muvautomation
+LogsDirectoryMode=0750
 
-# Sandboxing: el proceso solo puede escribir la DB y los logs.
+# Sandboxing: ProtectSystem=strict deja todo el sistema en solo lectura; solo se escribe en
+# StateDirectory (DB) y LogsDirectory (logs).
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/opt/fdsi-lab3/app /opt/fdsi-lab3/logs
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -28,6 +39,21 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+LimitNOFILE=4096
+TasksMax=128
 
 [Install]
 WantedBy=multi-user.target

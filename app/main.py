@@ -20,23 +20,33 @@ import logging
 import os
 import secrets
 import sqlite3
+import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Path as PathParam
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, IPvAnyAddress
 
 from app import enrichment, escalation
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DB_PATH = Path(__file__).resolve().parent / "alerts.db"
-LOG_DIR = BASE_DIR / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# En el servidor, systemd define MUV_DATA_DIR / MUV_LOG_DIR (StateDirectory / LogsDirectory)
+# para que el codigo de la app quede de solo lectura. Sin ellas se usan las rutas del repo.
+DATA_DIR = Path(os.environ.get("MUV_DATA_DIR") or Path(__file__).resolve().parent)
+DB_PATH = DATA_DIR / "alerts.db"
+LOG_DIR = Path(os.environ.get("MUV_LOG_DIR") or BASE_DIR / "logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Topes contra agotamiento de disco (una clave de emisor filtrada no puede llenar el servidor).
+MAX_ALERTS = int(os.environ.get("MUV_MAX_ALERTS", "50000"))
+MAX_ACTIONS_PER_ALERT = 200
 
 action_logger = logging.getLogger("actions")
 action_logger.setLevel(logging.INFO)
@@ -48,6 +58,8 @@ if not action_logger.handlers:
 Severity = Literal["low", "medium", "high", "critical"]
 Status = Literal["new", "classified", "escalated", "acknowledged", "closed"]
 ActionName = Literal["acknowledge", "comment", "escalate", "close"]
+
+AlertId = Annotated[str, PathParam(pattern=r"^[0-9a-fA-F-]{36}$")]
 
 ROLE_ACTIONS: dict[str, set[str]] = {
     "lector": {"acknowledge", "comment"},
@@ -102,6 +114,9 @@ def load_analysts(raw: str) -> dict[str, Analyst]:
         name, role, key = entry.split(":", 2)
         if role not in ROLE_ACTIONS or not usable_secret(key):
             raise ValueError(f"MUV_ANALYSTS: entrada invalida para '{name}'")
+        if key in analysts:
+            # Una misma clave para dos analistas anularia la atribucion y los roles.
+            raise ValueError(f"MUV_ANALYSTS: clave repetida para '{name}'")
         analysts[key] = Analyst(name=name, role=role)
     return analysts
 
@@ -110,6 +125,8 @@ API_KEY = os.environ.get("MUV_API_KEY", "")
 if not usable_secret(API_KEY):
     API_KEY = ""
 ANALYSTS = load_analysts(os.environ.get("MUV_ANALYSTS", ""))
+if API_KEY in ANALYSTS:
+    raise ValueError("MUV_API_KEY no puede coincidir con la clave de un analista")
 
 # --- Base de datos -------------------------------------------------------------
 
@@ -122,8 +139,16 @@ NEW_COLUMNS = {
 }
 
 
+def connect() -> sqlite3.Connection:
+    # timeout = busy_timeout: las escrituras concurrentes esperan en vez de fallar con "database is locked".
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
 def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
+    with connect() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")  # los lectores no bloquean al escritor
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS alerts (
@@ -174,11 +199,15 @@ def init_db() -> None:
                     ),
                 )
         conn.commit()
+    try:
+        os.chmod(DB_PATH, 0o600)  # solo el usuario del servicio (no-op en Windows)
+    except OSError:
+        pass
 
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect()
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -283,23 +312,84 @@ def log_action(
 # --- Autenticacion / autorizacion ---------------------------------------------
 
 
+# Anti fuerza bruta: tras MAX_AUTH_FAILURES claves invalidas en AUTH_WINDOW_S desde una
+# misma IP, esa IP recibe 429 durante AUTH_WINDOW_S aunque presente una clave valida.
+# Estado en memoria (un solo worker de uvicorn); Nginx aporta el limite por tasa.
+MAX_AUTH_FAILURES = 5
+AUTH_WINDOW_S = 300
+_auth_failures: dict[str, list[float]] = {}
+_auth_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _check_not_locked(request: Request, action: str) -> None:
+    ip, now = _client_ip(request), time.monotonic()
+    with _auth_lock:
+        recent = [t for t in _auth_failures.get(ip, []) if now - t < AUTH_WINDOW_S]
+        if recent:
+            _auth_failures[ip] = recent
+        else:
+            _auth_failures.pop(ip, None)
+        locked = len(recent) >= MAX_AUTH_FAILURES
+    if locked:
+        log_action(request, action, result="locked_out")
+        raise HTTPException(
+            status_code=429, detail="Too many failed attempts", headers={"Retry-After": str(AUTH_WINDOW_S)}
+        )
+
+
+def _register_failure(request: Request) -> None:
+    ip = _client_ip(request)
+    with _auth_lock:
+        if ip not in _auth_failures and len(_auth_failures) >= 10_000:
+            # Tope de memoria: se descarta la IP mas antigua, sin borrar los bloqueos activos del resto.
+            _auth_failures.pop(next(iter(_auth_failures)))
+        _auth_failures.setdefault(ip, []).append(time.monotonic())
+
+
 def require_api_key(
-    request: Request, x_api_key: Optional[str] = Header(default=None)
+    request: Request, x_api_key: Optional[str] = Header(default=None, max_length=256)
 ) -> None:
-    if not API_KEY or x_api_key is None or not secrets.compare_digest(x_api_key, API_KEY):
+    _check_not_locked(request, "create_alert_locked_out")
+    if not API_KEY or x_api_key is None or not secrets.compare_digest(
+        x_api_key.encode(), API_KEY.encode()
+    ):
+        _register_failure(request)
         log_action(request, "create_alert_unauthorized", result="unauthorized")
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 def require_analyst(
-    request: Request, x_analyst_key: Optional[str] = Header(default=None)
+    request: Request, x_analyst_key: Optional[str] = Header(default=None, max_length=256)
 ) -> Analyst:
+    _check_not_locked(request, "analyst_locked_out")
     if x_analyst_key is not None:
+        # Se recorren todas las claves sin cortar antes: tiempo constante respecto a cual acierta.
+        found = None
         for key, analyst in ANALYSTS.items():
-            if secrets.compare_digest(x_analyst_key, key):
-                return analyst
+            if secrets.compare_digest(x_analyst_key.encode(), key.encode()):
+                found = analyst
+        if found:
+            return found
+    _register_failure(request)
     log_action(request, "analyst_unauthorized", result="unauthorized")
     raise HTTPException(status_code=401, detail="Invalid or missing analyst key")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    # Defensa en profundidad: aunque Nginx se omita, la app no sirve respuestas cacheables
+    # ni embebibles. Las respuestas contienen datos de alertas: nunca deben cachearse.
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    return response
 
 
 # --- Motores (clasificacion + escalamiento) -----------------------------------
@@ -370,6 +460,9 @@ def create_alert(alert: AlertIn, request: Request, background_tasks: BackgroundT
     created_at = datetime.now(timezone.utc).isoformat()
     source_ip = str(alert.source_ip) if alert.source_ip else None
     with get_db() as conn:
+        if conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] >= MAX_ALERTS:
+            log_action(request, "create_alert_quota", actor="emisor:falcon-api-key", result="quota_exceeded")
+            raise HTTPException(status_code=507, detail="Alert storage quota reached")
         conn.execute(
             "INSERT INTO alerts (id, created_at, severity, tactic, technique, "
             "hostname, description, status, source_ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -427,7 +520,7 @@ def list_alerts(
 
 
 @app.get("/alerts/{alert_id}", response_model=AlertDetail)
-def get_alert(alert_id: str, request: Request, analyst: Analyst = Depends(require_analyst)):
+def get_alert(alert_id: AlertId, request: Request, analyst: Analyst = Depends(require_analyst)):
     actor = f"analyst:{analyst.name}"
     with get_db() as conn:
         row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -445,7 +538,7 @@ def get_alert(alert_id: str, request: Request, analyst: Analyst = Depends(requir
 
 @app.post("/alerts/{alert_id}/actions", response_model=ActionOut, status_code=201)
 def register_action(
-    alert_id: str,
+    alert_id: AlertId,
     body: ActionIn,
     request: Request,
     analyst: Analyst = Depends(require_analyst),
@@ -464,12 +557,21 @@ def register_action(
         if row["status"] == "closed" and body.action != "comment":
             log_action(request, f"action_{body.action}", alert_id, actor=actor, result="conflict")
             raise HTTPException(status_code=409, detail="Alert is closed")
+        n_actions = conn.execute(
+            "SELECT COUNT(*) FROM alert_actions WHERE alert_id = ?", (alert_id,)
+        ).fetchone()[0]
+        if n_actions >= MAX_ACTIONS_PER_ALERT:
+            log_action(request, f"action_{body.action}", alert_id, actor=actor, result="quota_exceeded")
+            raise HTTPException(status_code=409, detail="Action limit reached for this alert")
         conn.execute(
             "INSERT INTO alert_actions (alert_id, created_at, analyst, role, action, note) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (alert_id, now, analyst.name, analyst.role, body.action, body.note),
         )
-        if body.action in ACTION_STATUS:
+        # Un acknowledge no puede degradar una alerta ya escalada (la escalacion
+        # solo termina con close, que exige rol respondedor).
+        downgrade = body.action == "acknowledge" and row["status"] == "escalated"
+        if body.action in ACTION_STATUS and not downgrade:
             conn.execute(
                 "UPDATE alerts SET status = ?, updated_at = ? WHERE id = ?",
                 (ACTION_STATUS[body.action], now, alert_id),

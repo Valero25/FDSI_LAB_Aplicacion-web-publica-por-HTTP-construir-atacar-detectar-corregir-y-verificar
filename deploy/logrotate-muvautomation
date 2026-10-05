@@ -1,0 +1,14 @@
+# Instalar: sudo install -m 644 deploy/logrotate-muvautomation /etc/logrotate.d/muvautomation
+# copytruncate: la app mantiene el archivo abierto (logging.FileHandler) y no se reinicia.
+/var/log/muvautomation/*.log {
+    weekly
+    rotate 8
+    maxsize 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 muvapi muvapi
+    su muvapi muvapi
+}

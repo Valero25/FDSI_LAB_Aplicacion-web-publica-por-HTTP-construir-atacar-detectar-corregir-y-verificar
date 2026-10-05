@@ -11,8 +11,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = Path(os.environ.get("MUV_LOG_DIR") or Path(__file__).resolve().parent.parent / "logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 notify_logger = logging.getLogger("escalations")
 notify_logger.setLevel(logging.INFO)
