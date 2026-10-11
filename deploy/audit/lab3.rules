@@ -1,0 +1,30 @@
+# Instalar: sudo install -m 640 deploy/audit/lab3.rules /etc/audit/rules.d/lab3.rules && sudo augenrules --load
+# Requiere el paquete auditd. Consulta: sudo ausearch -k lab3_secrets -i   (o aureport -k)
+# Solo se vigila lo que nadie debe tocar sin dejar rastro; las escrituras normales de la API en
+# alerts.db no se auditan (generarian ruido), solo los cambios de atributos/permisos.
+
+# Secretos y claves
+-w /etc/muvautomation.env -p rwa -k lab3_secrets
+-w /etc/ssl/private -p wa -k lab3_tls_key
+
+# Codigo de la aplicacion (debe ser de solo lectura para el servicio)
+-w /opt/fdsi-lab3 -p wa -k lab3_code
+
+# Datos y registros: solo cambios de permisos/propietario
+-w /var/lib/muvautomation -p a -k lab3_data_attr
+-w /var/log/muvautomation -p a -k lab3_log_attr
+
+# Configuracion de los controles defensivos
+-w /etc/ssh/sshd_config -p wa -k lab3_ssh
+-w /etc/ssh/sshd_config.d -p wa -k lab3_ssh
+-w /etc/nginx -p wa -k lab3_nginx
+-w /etc/ufw -p wa -k lab3_firewall
+-w /etc/fail2ban -p wa -k lab3_fail2ban
+-w /etc/systemd/system -p wa -k lab3_units
+
+# Identidad y privilegios
+-w /etc/passwd -p wa -k lab3_identity
+-w /etc/shadow -p wa -k lab3_identity
+-w /etc/group -p wa -k lab3_identity
+-w /etc/sudoers -p wa -k lab3_sudo
+-w /etc/sudoers.d -p wa -k lab3_sudo

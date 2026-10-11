@@ -1,0 +1,12 @@
+# Instalar: sudo install -m 644 deploy/muvautomation-detect.timer /etc/systemd/system/
+#           sudo systemctl enable --now muvautomation-detect.timer
+[Unit]
+Description=MuvAutomation - deteccion periodica sobre el access.log
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

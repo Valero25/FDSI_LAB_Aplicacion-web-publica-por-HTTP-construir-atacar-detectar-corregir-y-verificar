@@ -195,43 +195,42 @@ sudo openssl req -x509 -newkey rsa:3072 -nodes -days 365 \
 sudo chmod 600 /etc/ssl/private/lab3-server.key
 
 # 2. Secretos fuera del repositorio (G10, G14, G16)
-sudo install -m 640 -o root -g www-data deploy/muvautomation.env.example /etc/muvautomation.env
+sudo install -m 600 -o root -g root deploy/muvautomation.env.example /etc/muvautomation.env
 sudo sed -i "s/^MUV_API_KEY=.*/MUV_API_KEY=$(openssl rand -hex 32)/" /etc/muvautomation.env
 sudo sed -i "s/CAMBIAR_CLAVE_ANA/$(openssl rand -hex 32)/; s/CAMBIAR_CLAVE_JUAN/$(openssl rand -hex 32)/" /etc/muvautomation.env
 sudoedit /etc/muvautomation.env   # opcional: ABUSEIPDB_API_KEY (cuenta gratuita)
 # Si quedan valores de ejemplo, la API los rechaza: fail closed.
 
-# 3. Servicio con sandboxing (G11)
-sudo cp deploy/muvautomation-api.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl restart muvautomation-api
-
-# 4. Nginx fortalecido (G1-G3, G5-G8, G12)
+# 3. Nginx fortalecido (G1-G3, G5-G8, G12)
 sudo cp nginx/muvautomation.conf /etc/nginx/sites-available/fdsi-lab3
+sudo ln -sf /etc/nginx/sites-available/fdsi-lab3 /etc/nginx/sites-enabled/fdsi-lab3
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 
-# 5. Firewall: PRIMERO los allow, DESPUÉS los delete (lección de la Parte 1, §7) (G4, G5)
-sudo ufw allow from 192.168.61.0/24 to any port 22 proto tcp
-sudo ufw allow from 192.168.61.0/24 to any port 443 proto tcp
-sudo ufw status numbered          # identificar los números de "OpenSSH ALLOW Anywhere" (v4 y v6)
-sudo ufw delete <n>               # borrar esas reglas, de la más alta a la más baja
-
-# 5b. Filtrado de salida (G15): primero los allow out, después el default deny
-sudo ufw allow out 53
-sudo ufw allow out 123/udp
-sudo ufw allow out 80/tcp         # apt
-sudo ufw allow out 443/tcp        # apt, AbuseIPDB
-sudo ufw default deny outgoing
-
-# 6. SSH solo con llave (G4) - probar primero la llave desde otra terminal
-sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/; s/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sudo sshd -t && sudo systemctl reload ssh
-
-# 7. Permisos mínimos (G12)
-sudo chmod -R o-rwx /opt/fdsi-lab3
-sudo chmod 640 /opt/fdsi-lab3/app/alerts.db /opt/fdsi-lab3/logs/actions.log
+# 4. Endurecimiento del host: usuario muvapi, DB/logs fuera del codigo, ufw (limit + deny),
+#    borrado de "OpenSSH ALLOW Anywhere", filtrado de salida (G15), sshd solo con llave (G4),
+#    fail2ban, auditd, sysctl, sandbox de Nginx, servicio con sandboxing y timer de deteccion.
+#    Ejecutar desde una sesion SSH con llave dentro del CIDR (el script aborta sin cambios si no).
+sudo LAB_CIDR=192.168.61.0/24 ADMIN_USER=$USER SSH_CLIENT="$SSH_CLIENT" bash deploy/harden-host.sh
+#    SSH_CLIENT se pasa a mano porque sudo lo elimina (sin el, el script usa `who -m`).
+#    Con EGRESS_FILTER=no se omite el filtrado de salida si se necesita otro destino.
 ```
 
-Además hay que volver a poner el repositorio de GitHub en **privado** y clonar con una deploy key (G12).
+El script es **idempotente**: tras un `git pull` basta repetirlo y reinicia la API. Reemplaza los pasos manuales de las versiones anteriores (reglas `ufw`, `sed` sobre `sshd_config` y `chmod -R o-rwx`, que ya no aplican porque el codigo pertenece a `root` y el servicio solo lo lee).
+
+El repositorio de GitHub quedó en **privado** (11-oct-2026). La VM lo clona con una **deploy key de solo lectura** y por **SSH sobre el puerto 443**, porque el filtrado de salida (G15) bloquea el 22 saliente:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/lab3_deploy -N ""      # agregar la .pub en GitHub: Settings > Deploy keys (sin write)
+cat >> ~/.ssh/config <<'EOF2'
+Host ssh.github.com
+  Port 443
+  IdentityFile ~/.ssh/lab3_deploy
+EOF2
+git remote set-url origin ssh://git@ssh.github.com:443/<usuario>/<repositorio>.git
+```
+
+Tras actualizar el codigo, verificar el banner: `sudo sshd -T | grep -i debianbanner` debe decir `no`, y `nmap -sV -p 22` desde Kali ya no debe mostrar el sufijo de Ubuntu.
 
 ---
 
@@ -317,6 +316,38 @@ La validación de sintaxis también pasa: `nginx -t` en `nginx:1.28` → `syntax
 | `sudo ufw status verbose` | OpenSSH Anywhere (v4 y v6); `allow (outgoing)` | 22/80/443 solo desde `192.168.61.0/24`; `deny (outgoing)` con excepciones 53/123/80/443 | _pendiente_ |
 | `nmap -sV -p- 192.168.61.129` (desde Windows) | 22, 80 | 22, 80 (redirección), 443 | _pendiente_ |
 | `systemd-analyze security muvautomation-api` | puntaje base (≈9, "UNSAFE") | puntaje menor | _pendiente_ |
+
+### 9.4 Hallazgos de la prueba en las VM (11-oct-2026) y su correccion
+
+| # | Hallazgo | Correccion |
+|---|---|---|
+| 1 | `harden-host.sh` no borraba `OpenSSH ALLOW Anywhere`: el `limit` quedaba debajo y SSH seguia abierto a todos | El script borra las reglas abiertas (22, 80, 443, OpenSSH, Nginx Full) y avisa si queda alguna |
+| 2 | El filtrado de salida (G15) era manual | El script lo aplica (53, 123/udp, 80, 443, 67/udp); `EGRESS_FILTER=no` lo omite |
+| 3 | R4 trataba los bloqueos salientes (`IN=` vacio) como escaneo | `parse_ufw` descarta las lineas con `IN=` vacio |
+| 4 | `detect.py` repetia la misma senal cada 5 min y la unidad quedaba en `failed` | `--state-file` recuerda lo reportado; `SuccessExitStatus=10` (el codigo 2 queda para errores de uso, asi un detector roto no parece exitoso) |
+| 5 | R4 sin margen: ufw limita el registro y solo escribio 10 de 198 puertos | Umbral por defecto 5 |
+| 6 | Latencia de deteccion de 5 min | Timer cada 1 min |
+| 7 | SSH revelaba version y distribucion. La primera correccion **no se aplicaba**: `sshd -T \| grep -q` cerraba la tuberia antes de tiempo y, con `pipefail`, la condicion fallaba en silencio | La salida de `sshd -T` se guarda en una variable antes de buscar; el script avisa si `debianbanner` sigue en `yes` |
+| 8 | `GET /` anonimo escribia en el audit log | Ya no se registra |
+| 9 | `enable --now` no reiniciaba la API tras actualizar el codigo | `systemctl restart` |
+| 10 | La copia vieja de `alerts.db` y `logs/` quedaba en el repositorio | El script la elimina tras migrar |
+| 11 | Las entradas invalidas (422) no dejaban rastro en `actions.log` | Accion `validation_error` con `request_id`, ruta, IP y solo `loc`/`type` de los campos que fallan |
+| 12 | El veto de fail2ban usaba `REJECT` (revela que hay firewall) | `banaction = ufw[blocktype=deny]` en los jails `muvautomation` y `sshd`: descarte silencioso |
+| 13 | Sin alerta para bloqueos salientes del propio servidor | Regla R5 en `detect.py` (ufw `deny outgoing`) |
+| 15 | Un JSON roto sin clave recibia 422 y escribia `validation_error` (FastAPI analiza el cuerpo antes de autenticar); anonimo y emisor eran indistinguibles (`actor: null`) | El handler de 422 comprueba antes la credencial: sin ella, 401 + `*_unauthorized` + cuenta para el bloqueo; con ella, 422 y `validation_error` con el actor real |
+| 14 | `HEAD /` devolvia 405 y `on_event("startup")` estaba obsoleto | `HEAD /` aceptado; arranque migrado a `lifespan` |
+
+**Falsos positivos y negativos de la deteccion**
+
+- R1-R3: un usuario legitimo con enlaces rotos, o varias personas detras de una misma IP (NAT), pueden alcanzar el umbral; un ataque lento (menos de 5 por ventana) o distribuido entre IPs no se detecta.
+- R4: ufw limita su propio registro, asi que un escaneo muy rapido deja pocas lineas; por eso el umbral es bajo. Un escaneo hacia puertos permitidos (22/80/443) desde el CIDR no genera bloqueos y no se ve.
+- El timer revisa cada minuto: la deteccion no es en tiempo real.
+
+**Riesgos residuales aceptados**
+
+- El bloqueo por IP tras 5 claves invalidas afecta tambien a un analista legitimo que comparta IP con el atacante (decision de diseño, prioriza frenar la fuerza bruta).
+- La IP `192.168.61.129` esta fija en `nginx/muvautomation.conf` y en el certificado: si el DHCP la cambia, hay que regenerarlos (recomendado: reserva DHCP o IP estatica).
+- Parches pendientes del sistema operativo: `unattended-upgrades` aplica los de seguridad; conviene un `apt upgrade` antes de la entrega.
 
 ---
 

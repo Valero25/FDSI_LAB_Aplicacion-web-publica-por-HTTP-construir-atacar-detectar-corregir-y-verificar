@@ -15,26 +15,30 @@ Parte 2 (Entrega 2): el cifrado lo hace Nginx (TLS); aqui se agregan:
 
 Ejecutar desde la raiz del repositorio: uvicorn app.main:app
 """
+import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from collections import deque
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi import Path as PathParam
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field, IPvAnyAddress
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field, IPvAnyAddress, field_validator
 
-from app import enrichment, escalation
+from app import enrichment, escalation, inventory
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 # En el servidor, systemd define MUV_DATA_DIR / MUV_LOG_DIR (StateDirectory / LogsDirectory)
@@ -47,6 +51,11 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Topes contra agotamiento de disco (una clave de emisor filtrada no puede llenar el servidor).
 MAX_ALERTS = int(os.environ.get("MUV_MAX_ALERTS", "50000"))
 MAX_ACTIONS_PER_ALERT = 200
+# Tope de ingesta por minuto (global: hay un solo emisor). Una clave de emisor filtrada no puede
+# llenar la cuota de MAX_ALERTS en minutos y dejar sin servicio al emisor legitimo.
+MAX_INGEST_PER_MIN = int(os.environ.get("MUV_MAX_INGEST_PER_MIN", "300"))
+_ingest_times: deque = deque()
+_ingest_lock = threading.Lock()
 
 action_logger = logging.getLogger("actions")
 action_logger.setLevel(logging.INFO)
@@ -54,6 +63,20 @@ if not action_logger.handlers:
     _handler = logging.FileHandler(LOG_DIR / "actions.log", encoding="utf-8")
     _handler.setFormatter(logging.Formatter("%(message)s"))
     action_logger.addHandler(_handler)
+
+# Texto libre que termina en logs, notificaciones y consolas de analistas: sin caracteres de
+# control (secuencias ANSI, NUL, saltos que falsifican lineas) ni de direccion de texto (U+202E
+# y similares, "trojan source"). En descripcion y notas se permiten saltos de linea y tabulador.
+_BIDI_AND_INVISIBLE = "\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff"
+_STRICT_TEXT_FORBIDDEN = re.compile(f"[\\x00-\\x1f\\x7f-\\x9f{_BIDI_AND_INVISIBLE}]")
+_MULTILINE_TEXT_FORBIDDEN = re.compile(f"[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f{_BIDI_AND_INVISIBLE}]")
+
+
+def _clean(value: str, pattern: re.Pattern) -> str:
+    if pattern.search(value):
+        raise ValueError("caracteres de control o de direccion de texto no permitidos")
+    return value
+
 
 Severity = Literal["low", "medium", "high", "critical"]
 Status = Literal["new", "classified", "escalated", "acknowledged", "closed"]
@@ -102,9 +125,22 @@ class Analyst:
     role: str
 
 
+# Valores de ejemplo de la documentacion: nunca deben aceptarse en un despliegue real.
+EXAMPLE_SECRETS = {
+    "clave-emisor-local-123456",
+    "clave-ana-local-123456",
+    "clave-juan-local-123456",
+}
+
+
 def usable_secret(value: str) -> bool:
-    # Rechaza claves cortas y los valores de ejemplo de deploy/muvautomation.env.example.
-    return len(value) >= 16 and not value.startswith("CAMBIAR")
+    # Rechaza claves cortas, de baja variedad y los valores de ejemplo (env.example y README).
+    return (
+        len(value) >= 16
+        and len(set(value)) >= 8
+        and not value.startswith("CAMBIAR")
+        and value not in EXAMPLE_SECRETS
+    )
 
 
 def load_analysts(raw: str) -> dict[str, Analyst]:
@@ -236,6 +272,16 @@ class AlertIn(BaseModel):
     description: str = Field(..., min_length=1, max_length=1000)
     source_ip: Optional[IPvAnyAddress] = None
 
+    @field_validator("tactic", "technique", "hostname")
+    @classmethod
+    def _strict(cls, v: str) -> str:
+        return _clean(v, _STRICT_TEXT_FORBIDDEN)
+
+    @field_validator("description")
+    @classmethod
+    def _multiline(cls, v: str) -> str:
+        return _clean(v, _MULTILINE_TEXT_FORBIDDEN)
+
 
 class AlertOut(BaseModel):
     id: str
@@ -259,6 +305,11 @@ class ActionIn(BaseModel):
     action: ActionName
     note: str = Field(default="", max_length=500)
 
+    @field_validator("note")
+    @classmethod
+    def _multiline(cls, v: str) -> str:
+        return _clean(v, _MULTILINE_TEXT_FORBIDDEN)
+
 
 class ActionOut(BaseModel):
     alert_id: str
@@ -273,7 +324,31 @@ class AlertDetail(AlertOut):
     actions: list[ActionOut]
 
 
+class NetworkDevice(BaseModel):
+    id: str
+    hostname: str
+    type: Literal["firewall", "router", "switch"]
+    vendor: str
+    model: str
+    location: str
+    zone: str
+    mgmt_ip: str
+    criticality: Literal["low", "medium", "high"]
+    owner: str
+    status: str
+
+
+DeviceId = Annotated[str, PathParam(pattern=r"^[A-Z0-9-]{3,32}$")]
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _on_startup()  # el cierre no necesita limpieza: el hilo de reprocesado es daemon
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="MuvAutomation - Falcon Incident Lab API",
     description="Prototipo de laboratorio. Datos ficticios.",
     version="0.3.0",
@@ -281,7 +356,44 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
+    # /alerts/ -> 404 en vez de un 307 cuyo Location se construye con el header Host del cliente.
+    redirect_slashes=False,
 )
+
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    # El 422 por defecto de FastAPI devuelve el valor enviado ("input"): una clave casi correcta o
+    # un dato sensible quedaria reflejado. Solo se informa donde y por que falla.
+    errors = [{"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in exc.errors()]
+    # FastAPI analiza el cuerpo ANTES de ejecutar las dependencias de autenticacion: un JSON roto
+    # llegaria aqui sin credencial. Un anonimo no debe obtener un 422 ni escribir en el audit log:
+    # se trata como cualquier otro intento sin credencial valida (401, mismo contador y bloqueo).
+    scope = _auth_scope(request)
+    if scope is not None:
+        actor = _authenticate_or_reject(request, scope)
+        if isinstance(actor, JSONResponse):
+            return actor
+    else:
+        actor = None
+    # Rastro de auditoria: ruta, IP, request_id, actor y QUE campos fallaron (loc/type). Nunca el
+    # valor enviado. loc puede contener nombres de campo elegidos por el cliente: se acotan.
+    failed = [
+        {"loc": [str(part)[:64] for part in e["loc"][:6]], "type": str(e["type"])[:64]} for e in errors[:10]
+    ]
+    write_log(
+        "validation_error",
+        method=request.method,
+        path=request.url.path[:256],
+        client_ip=request.client.host if request.client else None,
+        actor=actor,
+        result="validation_error",
+        request_id=getattr(request.state, "request_id", None),
+        errors=failed,
+    )
+    return JSONResponse(status_code=422, content={"detail": errors})
+
 
 # --- Registro de acciones (audit log) --------------------------------------------
 
@@ -301,11 +413,13 @@ def log_action(
     write_log(
         action,
         method=request.method,
-        path=request.url.path,
+        path=request.url.path[:256],  # un URL de 8 KB repetido no debe inflar el log
         client_ip=request.client.host if request.client else None,
         alert_id=alert_id,
         actor=actor,
         result=result,
+        # Mismo valor que Nginx registra como rid=<...> en access.log: correlacion exacta.
+        request_id=getattr(request.state, "request_id", None),
     )
 
 
@@ -322,11 +436,26 @@ _auth_lock = threading.Lock()
 
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    host = request.client.host if request.client else "unknown"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            return str(ip.ipv4_mapped)
+        # Un atacante IPv6 suele controlar un /64 completo: se agrupa por prefijo.
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return host
 
 
-def _check_not_locked(request: Request, action: str) -> None:
-    ip, now = _client_ip(request), time.monotonic()
+def _lock_key(request: Request, scope: str) -> str:
+    # Emisor y analistas llevan contadores separados: fallos en uno no bloquean al otro.
+    return f"{scope}:{_client_ip(request)}"
+
+
+def _check_not_locked(request: Request, action: str, scope: str) -> None:
+    ip, now = _lock_key(request, scope), time.monotonic()
     with _auth_lock:
         recent = [t for t in _auth_failures.get(ip, []) if now - t < AUTH_WINDOW_S]
         if recent:
@@ -341,8 +470,8 @@ def _check_not_locked(request: Request, action: str) -> None:
         )
 
 
-def _register_failure(request: Request) -> None:
-    ip = _client_ip(request)
+def _register_failure(request: Request, scope: str = "analyst") -> None:
+    ip = _lock_key(request, scope)
     with _auth_lock:
         if ip not in _auth_failures and len(_auth_failures) >= 10_000:
             # Tope de memoria: se descarta la IP mas antigua, sin borrar los bloqueos activos del resto.
@@ -350,14 +479,64 @@ def _register_failure(request: Request) -> None:
         _auth_failures.setdefault(ip, []).append(time.monotonic())
 
 
+EMITTER_ACTOR = "emisor:falcon-api-key"
+
+
+def _emitter_key_ok(key: Optional[str]) -> bool:
+    return bool(API_KEY) and key is not None and secrets.compare_digest(key.encode(), API_KEY.encode())
+
+
+def _find_analyst(key: Optional[str]) -> Optional[Analyst]:
+    if key is None:
+        return None
+    # Se recorren todas las claves sin cortar antes: tiempo constante respecto a cual acierta.
+    found = None
+    for known, analyst in ANALYSTS.items():
+        if secrets.compare_digest(key.encode(), known.encode()):
+            found = analyst
+    return found
+
+
+def _auth_scope(request: Request) -> Optional[str]:
+    """Que credencial exige la ruta (None = ruta publica). Debe coincidir con las dependencias."""
+    path = request.url.path
+    if path == "/alerts" and request.method == "POST":
+        return "emitter"
+    if path == "/alerts" or path.startswith("/alerts/") or path.startswith("/network/"):
+        return "analyst"
+    return None
+
+
+def _authenticate_or_reject(request: Request, scope: str):
+    """Para el handler de 422: devuelve el actor si la credencial es valida, o una respuesta 429/401."""
+    lock_action = "create_alert_locked_out" if scope == "emitter" else "analyst_locked_out"
+    try:
+        _check_not_locked(request, lock_action, scope)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+    # Las cabeceras de mas de 256 caracteres ya son invalidas (mismo limite que las dependencias).
+    if scope == "emitter":
+        key = request.headers.get("x-api-key")
+        if key is not None and len(key) <= 256 and _emitter_key_ok(key):
+            return EMITTER_ACTOR
+        _register_failure(request, "emitter")
+        log_action(request, "create_alert_unauthorized", result="unauthorized")
+        return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    key = request.headers.get("x-analyst-key")
+    analyst = _find_analyst(key) if key is not None and len(key) <= 256 else None
+    if analyst:
+        return f"analyst:{analyst.name}"
+    _register_failure(request)
+    log_action(request, "analyst_unauthorized", result="unauthorized")
+    return JSONResponse(status_code=401, content={"detail": "Invalid or missing analyst key"})
+
+
 def require_api_key(
     request: Request, x_api_key: Optional[str] = Header(default=None, max_length=256)
 ) -> None:
-    _check_not_locked(request, "create_alert_locked_out")
-    if not API_KEY or x_api_key is None or not secrets.compare_digest(
-        x_api_key.encode(), API_KEY.encode()
-    ):
-        _register_failure(request)
+    _check_not_locked(request, "create_alert_locked_out", "emitter")
+    if not _emitter_key_ok(x_api_key):
+        _register_failure(request, "emitter")
         log_action(request, "create_alert_unauthorized", result="unauthorized")
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
@@ -365,25 +544,28 @@ def require_api_key(
 def require_analyst(
     request: Request, x_analyst_key: Optional[str] = Header(default=None, max_length=256)
 ) -> Analyst:
-    _check_not_locked(request, "analyst_locked_out")
-    if x_analyst_key is not None:
-        # Se recorren todas las claves sin cortar antes: tiempo constante respecto a cual acierta.
-        found = None
-        for key, analyst in ANALYSTS.items():
-            if secrets.compare_digest(x_analyst_key.encode(), key.encode()):
-                found = analyst
-        if found:
-            return found
+    _check_not_locked(request, "analyst_locked_out", "analyst")
+    found = _find_analyst(x_analyst_key)
+    if found:
+        return found
     _register_failure(request)
     log_action(request, "analyst_unauthorized", result="unauthorized")
     raise HTTPException(status_code=401, detail="Invalid or missing analyst key")
 
 
+REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    # Nginx genera X-Request-ID ($request_id) y lo registra en access.log. Se acepta solo con la
+    # forma esperada (32 hex): un valor ajeno no puede inyectar texto en el audit log.
+    supplied = request.headers.get("x-request-id", "")
+    request.state.request_id = supplied if REQUEST_ID_RE.fullmatch(supplied) else uuid.uuid4().hex
     # Defensa en profundidad: aunque Nginx se omita, la app no sirve respuestas cacheables
     # ni embebibles. Las respuestas contienen datos de alertas: nunca deben cachearse.
     response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -395,19 +577,31 @@ async def security_headers(request: Request, call_next):
 # --- Motores (clasificacion + escalamiento) -----------------------------------
 
 
-def process_alert(alert_id: str) -> None:
+def process_alert(alert_id: str, request_id: Optional[str] = None) -> None:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
-        if row is None:
+    if row is None:
+        return
+    alert = row_to_alert(row)
+    # La clasificacion puede tardar (AbuseIPDB, hasta 3 s) y no retiene ningun bloqueo.
+    score, classification, enriched = enrichment.classify(alert)
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        # Se relee el estado bajo bloqueo de escritura: si un analista actuo mientras se
+        # clasificaba, el estado que dejo (closed, acknowledged, ...) se respeta.
+        conn.execute("BEGIN IMMEDIATE")
+        current = conn.execute("SELECT status FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if current is None:
             return
-        alert = row_to_alert(row)
-        score, classification, enriched = enrichment.classify(alert)
-        status = "escalated" if escalation.should_escalate(score) else "classified"
-        now = datetime.now(timezone.utc).isoformat()
+        new_status = current["status"]
+        auto_escalate = False
+        if current["status"] == "new":
+            auto_escalate = escalation.should_escalate(score)
+            new_status = "escalated" if auto_escalate else "classified"
         conn.execute(
             "UPDATE alerts SET risk_score = ?, classification = ?, enrichment = ?, "
             "status = ?, updated_at = ? WHERE id = ?",
-            (score, classification, json.dumps(enriched, ensure_ascii=False), status, now, alert_id),
+            (score, classification, json.dumps(enriched, ensure_ascii=False), new_status, now, alert_id),
         )
         conn.commit()
     alert.update(risk_score=score, classification=classification)
@@ -416,27 +610,48 @@ def process_alert(alert_id: str) -> None:
         alert_id=alert_id,
         actor="system:motor-clasificacion",
         result=f"{classification} ({score})",
+        request_id=request_id,
     )
-    if status == "escalated":
+    if auto_escalate:
         escalation.notify(alert, reason=f"auto: risk_score {score} >= {escalation.threshold()}")
-        write_log("alert_escalated", alert_id=alert_id, actor="system:motor-escalamiento", result="auto")
+        write_log(
+            "alert_escalated",
+            alert_id=alert_id,
+            actor="system:motor-escalamiento",
+            result="auto",
+            request_id=request_id,
+        )
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+# El reprocesado de pendientes corre en segundo plano para que el arranque no dependa de
+# servicios externos (AbuseIPDB lento o caido).
+_startup_thread: Optional[threading.Thread] = None
+
+
+def _reprocess_pending() -> None:
     with get_db() as conn:
         pending = conn.execute("SELECT id FROM alerts WHERE risk_score IS NULL").fetchall()
     for row in pending:
-        process_alert(row["id"])
+        try:
+            process_alert(row["id"])
+        except Exception as exc:  # una alerta defectuosa no debe frenar al resto
+            write_log("alert_classify_failed", alert_id=row["id"], actor="system", result=type(exc).__name__)
+
+
+def _on_startup() -> None:
+    global _startup_thread
+    escalation.threshold()  # falla al arrancar (no en la primera alerta) si el valor es invalido
+    init_db()
+    _startup_thread = threading.Thread(target=_reprocess_pending, name="reprocess-pending", daemon=True)
+    _startup_thread.start()
 
 
 # --- Endpoints -----------------------------------------------------------------
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def root(request: Request):
-    log_action(request, "view_root")
+    # Sin log_action: es una ruta anonima y cada visita inflaria el log de auditoria.
     return """<!doctype html>
 <html lang="es">
 <head><meta charset="utf-8"><title>MuvAutomation Falcon Lab</title></head>
@@ -456,10 +671,21 @@ def root(request: Request):
     dependencies=[Depends(require_api_key)],
 )
 def create_alert(alert: AlertIn, request: Request, background_tasks: BackgroundTasks):
+    now_m = time.monotonic()
+    with _ingest_lock:
+        while _ingest_times and now_m - _ingest_times[0] >= 60:
+            _ingest_times.popleft()
+        limited = len(_ingest_times) >= MAX_INGEST_PER_MIN
+        if not limited:
+            _ingest_times.append(now_m)
+    if limited:
+        log_action(request, "create_alert_rate_limited", actor="emisor:falcon-api-key", result="rate_limited")
+        raise HTTPException(status_code=429, detail="Ingest rate limit reached", headers={"Retry-After": "60"})
     alert_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
     source_ip = str(alert.source_ip) if alert.source_ip else None
     with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")  # el conteo de la cuota y el INSERT son atomicos
         if conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] >= MAX_ALERTS:
             log_action(request, "create_alert_quota", actor="emisor:falcon-api-key", result="quota_exceeded")
             raise HTTPException(status_code=507, detail="Alert storage quota reached")
@@ -478,11 +704,14 @@ def create_alert(alert: AlertIn, request: Request, background_tasks: BackgroundT
                 source_ip,
             ),
         )
+        stored = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
         conn.commit()
+    if stored >= 0.9 * MAX_ALERTS and stored % 100 == 0:
+        write_log("alert_quota_warning", actor="system", result=f"{stored}/{MAX_ALERTS}")
     log_action(request, "create_alert", alert_id, actor="emisor:falcon-api-key")
     # La clasificacion (que puede consultar AbuseIPDB) corre despues de responder:
     # una API externa lenta o caida nunca bloquea la ingesta.
-    background_tasks.add_task(process_alert, alert_id)
+    background_tasks.add_task(process_alert, alert_id, request.state.request_id)
     return AlertOut(
         id=alert_id,
         created_at=created_at,
@@ -550,6 +779,9 @@ def register_action(
 
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
+        # Estado leido, decision y escritura bajo un mismo bloqueo: dos acciones concurrentes
+        # (p. ej. close + acknowledge) no pueden reabrir una alerta cerrada.
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
         if row is None:
             log_action(request, f"action_{body.action}", alert_id, actor=actor, result="not_found")
@@ -588,3 +820,27 @@ def register_action(
         action=body.action,
         note=body.note,
     )
+
+
+# --- Inventario de red (solo lectura) -------------------------------------------
+
+
+@app.get("/network/devices", response_model=list[NetworkDevice])
+def list_network_devices(
+    request: Request,
+    analyst: Analyst = Depends(require_analyst),
+    type: Optional[Literal["firewall", "router", "switch"]] = None,
+):
+    log_action(request, "list_network_devices", actor=f"analyst:{analyst.name}")
+    return inventory.list_devices(type)
+
+
+@app.get("/network/devices/{device_id}", response_model=NetworkDevice)
+def get_network_device(device_id: DeviceId, request: Request, analyst: Analyst = Depends(require_analyst)):
+    actor = f"analyst:{analyst.name}"
+    device = inventory.get_device(device_id)
+    if device is None:
+        log_action(request, "get_network_device_not_found", actor=actor, result="not_found")
+        raise HTTPException(status_code=404, detail="Device not found")
+    log_action(request, "get_network_device", actor=actor)
+    return device

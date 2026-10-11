@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "note": "Inventario ficticio de solo lectura (Lab 3). Sin credenciales ni direcciones reales; las IP son TEST-NET-1 (RFC 5737).",
+  "devices": [
+    {
+      "id": "FW-LAB-01",
+      "hostname": "fw-lab-01",
+      "type": "firewall",
+      "vendor": "ExampleNet",
+      "model": "EN-FW-200",
+      "location": "Rack A1",
+      "zone": "perimetro",
+      "mgmt_ip": "192.0.2.1",
+      "criticality": "high",
+      "owner": "Blue Team",
+      "status": "active"
+    },
+    {
+      "id": "RT-LAB-01",
+      "hostname": "rt-lab-01",
+      "type": "router",
+      "vendor": "ExampleNet",
+      "model": "EN-RT-100",
+      "location": "Rack A1",
+      "zone": "perimetro",
+      "mgmt_ip": "192.0.2.2",
+      "criticality": "high",
+      "owner": "Blue Team",
+      "status": "active"
+    },
+    {
+      "id": "SW-LAB-01",
+      "hostname": "sw-lab-01",
+      "type": "switch",
+      "vendor": "ExampleNet",
+      "model": "EN-SW-48",
+      "location": "Rack A2",
+      "zone": "servidores",
+      "mgmt_ip": "192.0.2.10",
+      "criticality": "medium",
+      "owner": "Blue Team",
+      "status": "active"
+    },
+    {
+      "id": "SW-LAB-02",
+      "hostname": "sw-lab-02",
+      "type": "switch",
+      "vendor": "ExampleNet",
+      "model": "EN-SW-24",
+      "location": "Rack B1",
+      "zone": "usuarios",
+      "mgmt_ip": "192.0.2.11",
+      "criticality": "low",
+      "owner": "Blue Team",
+      "status": "active"
+    },
+    {
+      "id": "FW-LAB-02",
+      "hostname": "fw-lab-02",
+      "type": "firewall",
+      "vendor": "ExampleNet",
+      "model": "EN-FW-100",
+      "location": "Rack B1",
+      "zone": "dmz",
+      "mgmt_ip": "192.0.2.20",
+      "criticality": "medium",
+      "owner": "Blue Team",
+      "status": "active"
+    },
+    {
+      "id": "RT-LAB-02",
+      "hostname": "rt-lab-02",
+      "type": "router",
+      "vendor": "ExampleNet",
+      "model": "EN-RT-50",
+      "location": "Rack B2",
+      "zone": "sucursal",
+      "mgmt_ip": "192.0.2.30",
+      "criticality": "low",
+      "owner": "Blue Team",
+      "status": "active"
+    }
+  ]
+}

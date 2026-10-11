@@ -81,6 +81,8 @@ Los diagramas de la Parte 2 están en [INFORME_PARTE2.md §7](INFORME_PARTE2.md#
 | GET | `/alerts?severity=&status=&min_score=&limit=` | Lista de alertas con filtros, `risk_score`, clasificación y enriquecimiento | Analista (`X-Analyst-Key`, cualquier rol) |
 | GET | `/alerts/{alert_id}` | Detalle de la alerta con su historial de acciones; 404 si no existe | Analista (cualquier rol) |
 | POST | `/alerts/{alert_id}/actions` | `acknowledge`, `comment`, `escalate` o `close` | `lector`: acknowledge y comment · `respondedor`: todas |
+| GET | `/network/devices?type=` | Inventario de red ficticio **de solo lectura** (firewalls, routers, switches); sin credenciales | Analista (cualquier rol) |
+| GET | `/network/devices/{device_id}` | Detalle de un dispositivo; 404 si no existe. No hay endpoints de escritura (POST/PUT/PATCH/DELETE → 405) | Analista (cualquier rol) |
 
 Cada request relevante queda registrado en `logs/actions.log`, un JSON por línea con timestamp UTC, acción, método, ruta, IP de origen, `alert_id`, **actor** (`emisor:…`, `analyst:<nombre>` o `system:motor-…`) y **resultado** (`ok`, `unauthorized`, `forbidden`, `not_found`, `conflict`). Los escalamientos se notifican en `logs/escalations.log`.
 
@@ -96,7 +98,7 @@ app/
 scripts/
 └── build_mitre_index.py           # regenera el índice MITRE desde el bundle STIX oficial
 tests/
-└── test_api.py                    # 24 pruebas de los controles y de los motores
+└── test_api.py                    # pruebas de los controles y de los motores
 nginx/
 └── muvautomation.conf             # :80 -> 301, :443 TLS + hardening -> 127.0.0.1:8000
 deploy/
@@ -122,24 +124,26 @@ Desde la **raíz** del repositorio (`app/` es un paquete):
 python -m venv .venv
 source .venv/bin/activate          # en Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-export MUV_API_KEY=clave-emisor-local-123456
-export MUV_ANALYSTS="ana:respondedor:clave-ana-local-123456;juan:lector:clave-juan-local-12345"
+# Claves aleatorias (la API rechaza claves cortas, de baja variedad o de ejemplo):
+export MUV_API_KEY=$(python -c "import secrets; print(secrets.token_hex(16))")
+export ANA_KEY=$(python -c "import secrets; print(secrets.token_hex(16))")
+export MUV_ANALYSTS="ana:respondedor:$ANA_KEY;juan:lector:$(python -c "import secrets; print(secrets.token_hex(16))")"
 # export ABUSEIPDB_API_KEY=...     # opcional
 uvicorn app.main:app --reload
-python -m pytest -q                # 24 pruebas
+python -m pytest -q                # 102 pruebas (API + detección)
 ```
 
-En PowerShell, las variables se definen así: `$env:MUV_API_KEY="clave-emisor-local-123456"`.
+En PowerShell: `$env:MUV_API_KEY = python -c "import secrets; print(secrets.token_hex(16))"` (igual para `$env:ANA_KEY` y `$env:MUV_ANALYSTS`).
 
 Pruebas rápidas:
 
 ```bash
 curl -i http://127.0.0.1:8000/docs                                  # 404
 curl -s -X POST http://127.0.0.1:8000/alerts \
-  -H "Content-Type: application/json" -H "X-API-Key: clave-emisor-local-123456" \
+  -H "Content-Type: application/json" -H "X-API-Key: $MUV_API_KEY" \
   -d '{"severity":"critical","tactic":"Exfiltration","technique":"T1041 - Exfiltration Over C2 Channel","hostname":"DB-LAB-01","description":"Prueba de laboratorio"}'
 curl -i -X POST http://127.0.0.1:8000/alerts -H "Content-Type: application/json" -d '{}'   # 401
-curl -s "http://127.0.0.1:8000/alerts?min_score=70" -H "X-Analyst-Key: clave-ana-local-123456"
+curl -s "http://127.0.0.1:8000/alerts?min_score=70" -H "X-Analyst-Key: $ANA_KEY"
 curl -i http://127.0.0.1:8000/alerts                                # 401
 ```
 
@@ -162,5 +166,5 @@ curl -i http://127.0.0.1:8000/alerts                                # 401
 ## Estado del laboratorio
 
 - **Parte 1 — Fases A y B:** completa (ver [INFORME.md](INFORME.md)).
-- **Parte 2 — análisis de amenazas, hardening y motores:** implementada y probada con 24 pruebas automatizadas y un stack Nginx + TLS en Docker. Faltan las evidencias del servidor (ver [INFORME_PARTE2.md](INFORME_PARTE2.md)).
+- **Parte 2 — análisis de amenazas, hardening y motores:** implementada y probada con 102 pruebas automatizadas y un stack Nginx + TLS en Docker. Faltan las evidencias del servidor (ver [INFORME_PARTE2.md](INFORME_PARTE2.md)).
 - **Fases C–F** (ataque Red Team, detección Blue Team y verificación): pendientes.

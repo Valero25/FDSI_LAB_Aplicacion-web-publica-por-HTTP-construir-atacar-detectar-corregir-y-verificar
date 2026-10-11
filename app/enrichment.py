@@ -38,6 +38,7 @@ ABUSEIPDB_URL = "https://api.abuseipdb.com/api/v2/check"
 ABUSEIPDB_TIMEOUT_S = 3
 ABUSEIPDB_CACHE_TTL_S = 3600
 ABUSEIPDB_MAX_BYTES = 64 * 1024
+ABUSEIPDB_CACHE_MAX = 5000
 
 _abuse_cache: dict[str, tuple[float, dict]] = {}
 _abuse_budget = {"day": "", "used": 0}
@@ -124,7 +125,15 @@ def abuseipdb_check(source_ip: Optional[str]) -> dict:
         "total_reports": reports,
         "country_code": country,
     }
-    _abuse_cache[str(ip)] = (time.monotonic(), result)
+    with _abuse_lock:
+        if len(_abuse_cache) >= ABUSEIPDB_CACHE_MAX:
+            # Acotada: primero se descartan las expiradas y, si no basta, la mas antigua.
+            now = time.monotonic()
+            for key in [k for k, (t, _) in _abuse_cache.items() if now - t >= ABUSEIPDB_CACHE_TTL_S]:
+                del _abuse_cache[key]
+            if len(_abuse_cache) >= ABUSEIPDB_CACHE_MAX:
+                _abuse_cache.pop(next(iter(_abuse_cache)))
+        _abuse_cache[str(ip)] = (time.monotonic(), result)
     return result
 
 
