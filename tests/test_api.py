@@ -35,7 +35,6 @@ ALERT = {
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "alerts.db")
-    main._auth_failures.clear()  # el bloqueo por IP no debe filtrarse entre pruebas
     main._ingest_times.clear()  # ni el tope de ingesta por minuto
     with TestClient(main.app) as c:
         # El reprocesado de pendientes del arranque corre en segundo plano: se espera para
@@ -222,8 +221,7 @@ def test_abuseipdb_failure_does_not_block_classification(monkeypatch):
 # --- Anti fuerza bruta y cabeceras ------------------------------------------------
 
 
-def test_bruteforce_lockout_blocks_even_valid_key(client, monkeypatch):
-    monkeypatch.setattr(main, "_auth_failures", {})
+def test_bruteforce_lockout_blocks_even_valid_key(client):
     for _ in range(main.MAX_AUTH_FAILURES):
         assert client.get("/alerts", headers={"X-Analyst-Key": "x" * 20}).status_code == 401
     r = client.get("/alerts", headers=ANA)
@@ -259,16 +257,35 @@ def test_duplicate_analyst_keys_rejected():
         main.load_analysts("a:lector:clave-compartida-123456;b:respondedor:clave-compartida-123456")
 
 
-def test_lockout_table_evicts_oldest_not_everything(monkeypatch):
-    monkeypatch.setattr(main, "_auth_failures", {f"10.{i // 65000}.{i % 250}.{i // 250 % 250}": [1.0] for i in range(10_000)})
-    first = next(iter(main._auth_failures))
+def test_lockout_table_evicts_oldest_not_everything(client):
+    import time as _t
+
+    now = _t.time()
+    with main.get_db() as conn:
+        conn.executemany(
+            "INSERT INTO auth_failures (key, ts) VALUES (?, ?)",
+            [(f"analyst:10.{i // 65000}.{i % 250}.{i // 250 % 250}", now - 200 + i / 1000) for i in range(10_000)],
+        )
+        conn.commit()
 
     class Req:
         client = type("C", (), {"host": "203.0.113.9"})()
 
     main._register_failure(Req())
-    assert len(main._auth_failures) == 10_000
-    assert first not in main._auth_failures and "analyst:203.0.113.9" in main._auth_failures
+    with main.get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM auth_failures").fetchone()[0]
+        mine = conn.execute("SELECT COUNT(*) FROM auth_failures WHERE key = 'analyst:203.0.113.9'").fetchone()[0]
+    assert 9_000 < total <= 10_000 and mine == 1  # se descartaron los mas antiguos, no todo
+
+
+def test_lockout_survives_application_restart(client):
+    for _ in range(main.MAX_AUTH_FAILURES):
+        client.get("/alerts", headers={"X-Analyst-Key": "x" * 20})
+    assert client.get("/alerts", headers=ANA).status_code == 429
+    # "Reinicio": el estado esta en SQLite, no en la memoria del proceso.
+    assert not hasattr(main, "_auth_failures")
+    with main.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM auth_failures").fetchone()[0] >= main.MAX_AUTH_FAILURES
 
 
 # --- Cuotas y base de datos -----------------------------------------------------------

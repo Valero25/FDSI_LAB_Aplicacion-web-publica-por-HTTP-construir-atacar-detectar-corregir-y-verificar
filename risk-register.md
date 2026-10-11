@@ -70,9 +70,24 @@ Estados: **Corregido** (verificado) · **Mitigado** · **Aceptado** · **Pendien
 | `high` + táctica sin alto impacto = 60 (< umbral 70) no se escala sola, y el emisor declara severidad/táctica | Decisión de diseño que cambia los puntajes documentados | Pendiente de decisión |
 | Dependencias transitivas sin lockfile con hashes | Debe generarse en Linux (uvloop/httptools); `pip-audit`: sin vulnerabilidades conocidas | Pendiente |
 | `X-Forwarded-For` falsificable por procesos locales que alcancen `127.0.0.1:8000` | Requiere socket Unix entre Nginx y uvicorn | Aceptado |
-| Bloqueo anti fuerza bruta no persistente entre reinicios | Reducido con fail2ban | Mitigado |
+| Bloqueo anti fuerza bruta no persistente entre reinicios | Estado en SQLite (`auth_failures`); además fail2ban | Corregido (Etapa D) |
 | Descripciones de alertas con HTML se guardan sin escapar | Solo JSON con CSP `default-src 'none'`; escapar si hay front-end | Aceptado |
 | Migración a microservicios | Aumenta la superficie (broker, DB de red); no lo pide el Lab 3 | Descartado, ver evolución arquitectónica |
+
+## Etapa D: identidad y autenticación
+
+| ID | Riesgo (STRIDE) | Corrección | Verificación | Estado |
+|---|---|---|---|---|
+| D1 | Claves estáticas de analista: sin expiración, sin revocación, sin segundo factor (S, E) | Login con Argon2id y token EdDSA de 10 min; interruptor `MUV_ALLOW_ANALYST_STATIC_KEYS` | Pruebas automáticas (`tests/test_identity.py`) | Corregido (servidor: crear usuarios y apagar las claves) |
+| D2 | Falsificación de token: `alg: none`, confusión HS256/EdDSA, otra clave, audiencia o emisor ajenos (S) | Algoritmo fijo `EdDSA`, `iss`/`aud`/`exp`/`jti` obligatorios, rol y estado tomados de la base | 8 casos forjados → 401 | Corregido |
+| D3 | Robo de token de renovación (S, I) | Hash en base, rotación en cada uso, reutilización revoca la familia, evento `refresh_reuse_detected` | Pruebas | Corregido |
+| D4 | Enumeración de usuarios por respuesta o tiempo (I) | Respuesta idéntica y hash ficticio para usuarios inexistentes; la espera por cuenta tampoco distingue | Pruebas | Corregido |
+| D5 | Fuerza bruta de contraseñas y uso de Argon2 para agotar CPU (S, D) | Espera creciente por cuenta + bloqueo por IP + `limit_req` 20/min en `/auth/login` y `/auth/refresh` + contraseña máx. 128 | Pruebas; `nginx -t` en contenedor | Corregido (servidor: ejecutar) |
+| D6 | El rol con más poder (`respondedor`) dependía de una sola credencial (E) | TOTP obligatorio (secreto cifrado, código de un solo uso); el token sin `otp` se rechaza | Pruebas | Corregido |
+| D7 | `mgmt_ip` visible para cualquier rol (I) | Filtrado de campos por rol | Prueba | Corregido |
+| D8 | Revocación o bloqueo perdidos al reiniciar la app (E) | Estado en SQLite | Prueba de persistencia | Corregido |
+| D9 | Alta de usuarios por un endpoint abierto o con usuario por defecto (E) | Solo CLI en el host (`identity-admin.sh`); contraseña por terminal sin eco | Pruebas de la CLI | Corregido |
+| D10 | La clave de firma y la de cifrado de TOTP comparten host con la API (I) | Archivo de entorno 600 root, auditd; separación física pendiente | — | Aceptado |
 
 ## Límites de la verificación
 `nginx -t` y la prueba funcional de Nginx (headers sin duplicar, 403/404/413, rate limit 429, TLS, XFF falsificado) se ejecutaron en contenedor Docker. No se pudo ejecutar en local: `systemd-analyze`, `ufw`, `sshd -t` y `fail2ban` reales. Esos puntos quedan como "Servidor" y se comprueban con el retest.

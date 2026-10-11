@@ -78,10 +78,13 @@ Los diagramas de la Parte 2 están en [INFORME_PARTE2.md §7](INFORME_PARTE2.md#
 |---|---|---|---|
 | GET | `/` | Página informativa del portal (LAB) | Cualquiera (HTTPS) |
 | POST | `/alerts` | Ingesta de una alerta ficticia (con `source_ip` opcional). Se clasifica y, si corresponde, se escala en segundo plano | Emisor con `X-API-Key` |
-| GET | `/alerts?severity=&status=&min_score=&limit=` | Lista de alertas con filtros, `risk_score`, clasificación y enriquecimiento | Analista (`X-Analyst-Key`, cualquier rol) |
+| GET | `/alerts?severity=&status=&min_score=&limit=` | Lista de alertas con filtros, `risk_score`, clasificación y enriquecimiento | Analista (`Authorization: Bearer` o, si se permite, `X-Analyst-Key`; cualquier rol) |
 | GET | `/alerts/{alert_id}` | Detalle de la alerta con su historial de acciones; 404 si no existe | Analista (cualquier rol) |
 | POST | `/alerts/{alert_id}/actions` | `acknowledge`, `comment`, `escalate` o `close` | `lector`: acknowledge y comment · `respondedor`: todas |
-| GET | `/network/devices?type=` | Inventario de red ficticio **de solo lectura** (firewalls, routers, switches); sin credenciales | Analista (cualquier rol) |
+| POST | `/auth/login` | Usuario + contraseña (+ código TOTP) → token de acceso EdDSA de 10 min y token de renovación. Respuesta uniforme ante cualquier fallo | Público (limitado por tasa, espera creciente por cuenta) |
+| POST | `/auth/refresh` | Rota el token de renovación; reutilizar uno ya usado revoca la sesión | Titular del token de renovación |
+| POST | `/auth/logout` | Revoca el token de acceso (y la sesión, si se envía el de renovación) | Sesión con `Authorization: Bearer` |
+| GET | `/network/devices?type=` | Inventario de red ficticio **de solo lectura** (firewalls, routers, switches); sin credenciales. `mgmt_ip` solo para `respondedor` | Analista (cualquier rol) |
 | GET | `/network/devices/{device_id}` | Detalle de un dispositivo; 404 si no existe. No hay endpoints de escritura (POST/PUT/PATCH/DELETE → 405) | Analista (cualquier rol) |
 
 Cada request relevante queda registrado en `logs/actions.log`, un JSON por línea con timestamp UTC, acción, método, ruta, IP de origen, `alert_id`, **actor** (`emisor:…`, `analyst:<nombre>` o `system:motor-…`) y **resultado** (`ok`, `unauthorized`, `forbidden`, `not_found`, `conflict`). Los escalamientos se notifican en `logs/escalations.log`.
@@ -130,7 +133,7 @@ export ANA_KEY=$(python -c "import secrets; print(secrets.token_hex(16))")
 export MUV_ANALYSTS="ana:respondedor:$ANA_KEY;juan:lector:$(python -c "import secrets; print(secrets.token_hex(16))")"
 # export ABUSEIPDB_API_KEY=...     # opcional
 uvicorn app.main:app --reload
-python -m pytest -q                # 102 pruebas (API + detección)
+python -m pytest -q                # 146 pruebas (API, identidad y detección)
 ```
 
 En PowerShell: `$env:MUV_API_KEY = python -c "import secrets; print(secrets.token_hex(16))"` (igual para `$env:ANA_KEY` y `$env:MUV_ANALYSTS`).
@@ -158,13 +161,13 @@ curl -i http://127.0.0.1:8000/alerts                                # 401
 
 ## Limitaciones de seguridad pendientes
 
-- **La identidad es básica:** cada analista y el emisor usan una clave estática. Faltan SSO/MFA, expiración y rotación.
-- **No hay filtrado de campos por rol** en las respuestas (H4).
+- **Identidad:** servicio propio con Argon2id, tokens EdDSA, renovación con rotación y TOTP obligatorio para `respondedor` (ver [IDENTIDAD.md](IDENTIDAD.md)). Siguen faltando SSO/federación y recuperación autónoma de cuentas; la clave del emisor (máquina) es una API key estática.
+- **Filtrado de campos por rol:** `mgmt_ip` solo lo ve `respondedor`; el resto de campos del inventario es igual para todos.
 - **No hay integridad criptográfica** en `alerts.db` ni en los logs (H2): los permisos y el sandbox la reducen, pero no la garantizan.
 - **El certificado es autofirmado**, y las notificaciones de escalamiento van a un archivo, no a un canal real.
 
 ## Estado del laboratorio
 
 - **Parte 1 — Fases A y B:** completa (ver [INFORME.md](INFORME.md)).
-- **Parte 2 — análisis de amenazas, hardening y motores:** implementada y probada con 102 pruebas automatizadas y un stack Nginx + TLS en Docker. Faltan las evidencias del servidor (ver [INFORME_PARTE2.md](INFORME_PARTE2.md)).
+- **Parte 2 — análisis de amenazas, hardening y motores:** implementada y probada con 146 pruebas automatizadas y un stack Nginx + TLS en Docker. Faltan las evidencias del servidor (ver [INFORME_PARTE2.md](INFORME_PARTE2.md)).
 - **Fases C–F** (ataque Red Team, detección Blue Team y verificación): pendientes.

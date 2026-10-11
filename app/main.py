@@ -35,10 +35,10 @@ from typing import Annotated, Literal, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi import Path as PathParam
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, IPvAnyAddress, field_validator
 
-from app import enrichment, escalation, inventory
+from app import enrichment, escalation, identity, inventory
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 # En el servidor, systemd define MUV_DATA_DIR / MUV_LOG_DIR (StateDirectory / LogsDirectory)
@@ -217,6 +217,7 @@ def init_db() -> None:
             )
             """
         )
+        identity.init_schema(conn)
         count = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
         if count == 0:
             for seed in SEED_ALERTS:
@@ -332,7 +333,7 @@ class NetworkDevice(BaseModel):
     model: str
     location: str
     zone: str
-    mgmt_ip: str
+    mgmt_ip: Optional[str] = None  # solo se entrega al rol respondedor
     criticality: Literal["low", "medium", "high"]
     owner: str
     status: str
@@ -426,13 +427,21 @@ def log_action(
 # --- Autenticacion / autorizacion ---------------------------------------------
 
 
-# Anti fuerza bruta: tras MAX_AUTH_FAILURES claves invalidas en AUTH_WINDOW_S desde una
-# misma IP, esa IP recibe 429 durante AUTH_WINDOW_S aunque presente una clave valida.
-# Estado en memoria (un solo worker de uvicorn); Nginx aporta el limite por tasa.
+# Anti fuerza bruta: tras MAX_AUTH_FAILURES credenciales invalidas en AUTH_WINDOW_S desde una
+# misma IP, esa IP recibe 429 durante AUTH_WINDOW_S aunque presente una credencial valida.
+# El estado vive en SQLite (tabla auth_failures): sobrevive a un reinicio de la aplicacion.
 MAX_AUTH_FAILURES = 5
 AUTH_WINDOW_S = 300
-_auth_failures: dict[str, list[float]] = {}
-_auth_lock = threading.Lock()
+AUTH_FAILURES_MAX_ROWS = 10_000
+
+# Interruptor de las claves estaticas de analista (X-Analyst-Key). Con "no" solo se aceptan tokens
+# de identidad (Authorization: Bearer). La clave del emisor (maquina) no se ve afectada.
+ALLOW_STATIC_ANALYST_KEYS = os.environ.get("MUV_ALLOW_ANALYST_STATIC_KEYS", "yes").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "si",
+)
 
 
 def _client_ip(request: Request) -> str:
@@ -455,14 +464,14 @@ def _lock_key(request: Request, scope: str) -> str:
 
 
 def _check_not_locked(request: Request, action: str, scope: str) -> None:
-    ip, now = _lock_key(request, scope), time.monotonic()
-    with _auth_lock:
-        recent = [t for t in _auth_failures.get(ip, []) if now - t < AUTH_WINDOW_S]
-        if recent:
-            _auth_failures[ip] = recent
-        else:
-            _auth_failures.pop(ip, None)
-        locked = len(recent) >= MAX_AUTH_FAILURES
+    key, now = _lock_key(request, scope), time.time()
+    with get_db() as conn:
+        locked = (
+            conn.execute(
+                "SELECT COUNT(*) FROM auth_failures WHERE key = ? AND ts >= ?", (key, now - AUTH_WINDOW_S)
+            ).fetchone()[0]
+            >= MAX_AUTH_FAILURES
+        )
     if locked:
         log_action(request, action, result="locked_out")
         raise HTTPException(
@@ -471,12 +480,18 @@ def _check_not_locked(request: Request, action: str, scope: str) -> None:
 
 
 def _register_failure(request: Request, scope: str = "analyst") -> None:
-    ip = _lock_key(request, scope)
-    with _auth_lock:
-        if ip not in _auth_failures and len(_auth_failures) >= 10_000:
-            # Tope de memoria: se descarta la IP mas antigua, sin borrar los bloqueos activos del resto.
-            _auth_failures.pop(next(iter(_auth_failures)))
-        _auth_failures.setdefault(ip, []).append(time.monotonic())
+    key, now = _lock_key(request, scope), time.time()
+    with get_db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM auth_failures WHERE ts < ?", (now - AUTH_WINDOW_S,))
+        total = conn.execute("SELECT COUNT(*) FROM auth_failures").fetchone()[0]
+        if total >= AUTH_FAILURES_MAX_ROWS:
+            # Tope de tamano: se descartan los registros mas antiguos, no todo el estado.
+            conn.execute(
+                "DELETE FROM auth_failures WHERE rowid IN (SELECT rowid FROM auth_failures ORDER BY ts LIMIT 100)"
+            )
+        conn.execute("INSERT INTO auth_failures (key, ts) VALUES (?, ?)", (key, now))
+        conn.commit()
 
 
 EMITTER_ACTOR = "emisor:falcon-api-key"
@@ -497,19 +512,48 @@ def _find_analyst(key: Optional[str]) -> Optional[Analyst]:
     return found
 
 
+def _bearer_token(request: Request) -> Optional[str]:
+    header = request.headers.get("authorization")
+    if header and header[:7].lower() == "bearer ":
+        return header[7:].strip()
+    return None
+
+
+def _resolve_analyst(request: Request) -> Optional[Analyst]:
+    """Analista autenticado por token de identidad o, si esta permitido, por clave estatica."""
+    token = _bearer_token(request)
+    if token is not None:  # con Bearer presente no se cae a la clave estatica
+        try:
+            with get_db() as conn:
+                principal = identity.verify_access_token(conn, token)
+        except identity.IdentityError:
+            return None
+        request.state.principal = principal
+        return Analyst(principal.username, principal.role)
+    key = request.headers.get("x-analyst-key")
+    if ALLOW_STATIC_ANALYST_KEYS and key is not None and len(key) <= 256:
+        return _find_analyst(key)
+    return None
+
+
 def _auth_scope(request: Request) -> Optional[str]:
     """Que credencial exige la ruta (None = ruta publica). Debe coincidir con las dependencias."""
     path = request.url.path
     if path == "/alerts" and request.method == "POST":
         return "emitter"
-    if path == "/alerts" or path.startswith("/alerts/") or path.startswith("/network/"):
+    if path in ("/auth/login", "/auth/refresh"):
+        return "login"
+    if path == "/alerts" or path.startswith("/alerts/") or path.startswith("/network/") or path == "/auth/logout":
         return "analyst"
     return None
 
 
 def _authenticate_or_reject(request: Request, scope: str):
     """Para el handler de 422: devuelve el actor si la credencial es valida, o una respuesta 429/401."""
-    lock_action = "create_alert_locked_out" if scope == "emitter" else "analyst_locked_out"
+    lock_action = {
+        "emitter": "create_alert_locked_out",
+        "login": "login_locked_out",
+    }.get(scope, "analyst_locked_out")
     try:
         _check_not_locked(request, lock_action, scope)
     except HTTPException as exc:
@@ -522,13 +566,18 @@ def _authenticate_or_reject(request: Request, scope: str):
         _register_failure(request, "emitter")
         log_action(request, "create_alert_unauthorized", result="unauthorized")
         return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
-    key = request.headers.get("x-analyst-key")
-    analyst = _find_analyst(key) if key is not None and len(key) <= 256 else None
+    if scope == "login":
+        # Cuerpo mal formado en login/refresh: cuenta como un intento fallido mas (mismo contador).
+        _register_failure(request, "login")
+        action = "refresh_failed" if request.url.path == "/auth/refresh" else "login_failed"
+        log_action(request, action, result="unauthorized")
+        return JSONResponse(status_code=401, content={"detail": "Invalid credentials"})
+    analyst = _resolve_analyst(request)
     if analyst:
         return f"analyst:{analyst.name}"
     _register_failure(request)
     log_action(request, "analyst_unauthorized", result="unauthorized")
-    return JSONResponse(status_code=401, content={"detail": "Invalid or missing analyst key"})
+    return JSONResponse(status_code=401, content={"detail": "Invalid or missing credentials"})
 
 
 def require_api_key(
@@ -542,15 +591,17 @@ def require_api_key(
 
 
 def require_analyst(
-    request: Request, x_analyst_key: Optional[str] = Header(default=None, max_length=256)
+    request: Request,
+    x_analyst_key: Optional[str] = Header(default=None, max_length=256),
+    authorization: Optional[str] = Header(default=None, max_length=2100),
 ) -> Analyst:
     _check_not_locked(request, "analyst_locked_out", "analyst")
-    found = _find_analyst(x_analyst_key)
+    found = _resolve_analyst(request)
     if found:
         return found
     _register_failure(request)
     log_action(request, "analyst_unauthorized", result="unauthorized")
-    raise HTTPException(status_code=401, detail="Invalid or missing analyst key")
+    raise HTTPException(status_code=401, detail="Invalid or missing credentials")
 
 
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -822,20 +873,118 @@ def register_action(
     )
 
 
+# --- Identidad: login, renovacion y cierre de sesion -------------------------------
+
+
+class LoginIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    username: str = Field(pattern=r"^[A-Za-z0-9._-]{3,32}$")
+    password: str = Field(min_length=1, max_length=128)
+    otp: Optional[str] = Field(default=None, pattern=r"^[0-9]{6}$")
+
+
+class RefreshIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    refresh_token: str = Field(min_length=16, max_length=256)
+
+
+class LogoutIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    refresh_token: Optional[str] = Field(default=None, min_length=16, max_length=256)
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: Literal["Bearer"] = "Bearer"
+    expires_in: int
+    refresh_token: str
+
+
+def _identity_or_503(request: Request) -> None:
+    if not identity.enabled():
+        log_action(request, "identity_not_configured", result="unavailable")
+        raise HTTPException(status_code=503, detail="Identity service not configured")
+
+
+@app.post("/auth/login", response_model=TokenOut)
+def login(body: LoginIn, request: Request):
+    _check_not_locked(request, "login_locked_out", "login")
+    _identity_or_503(request)
+    actor = f"login:{body.username.lower()}"
+    with get_db() as conn:
+        try:
+            user, amr = identity.authenticate(conn, body.username, body.password, body.otp)
+        except identity.Throttled as wait:
+            log_action(request, "login_throttled", actor=actor, result="locked_out")
+            raise HTTPException(
+                status_code=429, detail="Too many failed attempts", headers={"Retry-After": str(wait.retry_after)}
+            )
+        except identity.InvalidCredentials:
+            # Misma respuesta y mismo cuerpo para usuario inexistente, contrasena o codigo incorrectos.
+            _register_failure(request, "login")
+            log_action(request, "login_failed", actor=actor, result="unauthorized")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        access, _jti, ttl = identity.issue_access_token(user, amr)
+        refresh_token = identity.issue_refresh_token(conn, user["username"], amr)
+        conn.commit()
+    log_action(request, "login_ok", actor=f"analyst:{user['username']}")
+    return TokenOut(access_token=access, expires_in=ttl, refresh_token=refresh_token)
+
+
+@app.post("/auth/refresh", response_model=TokenOut)
+def refresh(body: RefreshIn, request: Request):
+    _check_not_locked(request, "login_locked_out", "login")
+    _identity_or_503(request)
+    with get_db() as conn:
+        try:
+            user, amr, new_refresh = identity.rotate_refresh_token(conn, body.refresh_token)
+        except identity.RefreshReuse as reuse:
+            _register_failure(request, "login")
+            log_action(request, "refresh_reuse_detected", actor=f"analyst:{reuse.username}", result="unauthorized")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        except identity.TokenInvalid:
+            _register_failure(request, "login")
+            log_action(request, "refresh_failed", result="unauthorized")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        access, _jti, ttl = identity.issue_access_token(user, amr)
+    log_action(request, "refresh_ok", actor=f"analyst:{user['username']}")
+    return TokenOut(access_token=access, expires_in=ttl, refresh_token=new_refresh)
+
+
+@app.post("/auth/logout", status_code=204)
+def logout(request: Request, body: Optional[LogoutIn] = None, analyst: Analyst = Depends(require_analyst)):
+    principal = getattr(request.state, "principal", None)
+    with get_db() as conn:
+        if principal is not None:  # sesion por token: se revoca el token de acceso en uso
+            identity.revoke_access_token(conn, principal.jti, principal.exp)
+        if body and body.refresh_token:
+            identity.revoke_family_of(conn, body.refresh_token)
+        conn.commit()
+    log_action(request, "logout", actor=f"analyst:{analyst.name}")
+    return Response(status_code=204)
+
+
 # --- Inventario de red (solo lectura) -------------------------------------------
 
 
-@app.get("/network/devices", response_model=list[NetworkDevice])
+def _device_for_role(device: dict, role: str) -> dict:
+    """Filtrado de campos por rol: la IP de gestion solo la ve quien puede actuar (respondedor)."""
+    if role == "respondedor":
+        return device
+    return {k: v for k, v in device.items() if k != "mgmt_ip"}
+
+
+@app.get("/network/devices", response_model=list[NetworkDevice], response_model_exclude_none=True)
 def list_network_devices(
     request: Request,
     analyst: Analyst = Depends(require_analyst),
     type: Optional[Literal["firewall", "router", "switch"]] = None,
 ):
     log_action(request, "list_network_devices", actor=f"analyst:{analyst.name}")
-    return inventory.list_devices(type)
+    return [_device_for_role(d, analyst.role) for d in inventory.list_devices(type)]
 
 
-@app.get("/network/devices/{device_id}", response_model=NetworkDevice)
+@app.get("/network/devices/{device_id}", response_model=NetworkDevice, response_model_exclude_none=True)
 def get_network_device(device_id: DeviceId, request: Request, analyst: Analyst = Depends(require_analyst)):
     actor = f"analyst:{analyst.name}"
     device = inventory.get_device(device_id)
@@ -843,4 +992,4 @@ def get_network_device(device_id: DeviceId, request: Request, analyst: Analyst =
         log_action(request, "get_network_device_not_found", actor=actor, result="not_found")
         raise HTTPException(status_code=404, detail="Device not found")
     log_action(request, "get_network_device", actor=actor)
-    return device
+    return _device_for_role(device, analyst.role)
