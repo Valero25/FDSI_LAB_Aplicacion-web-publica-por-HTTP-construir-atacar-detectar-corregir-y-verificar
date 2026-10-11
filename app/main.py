@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -341,7 +341,14 @@ class NetworkDevice(BaseModel):
 DeviceId = Annotated[str, PathParam(pattern=r"^[A-Z0-9-]{3,32}$")]
 
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _on_startup()  # el cierre no necesita limpieza: el hilo de reprocesado es daemon
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="MuvAutomation - Falcon Incident Lab API",
     description="Prototipo de laboratorio. Datos ficticios.",
     version="0.3.0",
@@ -360,6 +367,21 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     # El 422 por defecto de FastAPI devuelve el valor enviado ("input"): una clave casi correcta o
     # un dato sensible quedaria reflejado. Solo se informa donde y por que falla.
     errors = [{"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in exc.errors()]
+    # Rastro de auditoria: ruta, IP, request_id y QUE campos fallaron (loc/type). Nunca el valor
+    # enviado. loc puede contener nombres de campo elegidos por el cliente: se acotan.
+    failed = [
+        {"loc": [str(part)[:64] for part in e["loc"][:6]], "type": str(e["type"])[:64]} for e in errors[:10]
+    ]
+    write_log(
+        "validation_error",
+        method=request.method,
+        path=request.url.path[:256],
+        client_ip=request.client.host if request.client else None,
+        actor=None,
+        result="validation_error",
+        request_id=getattr(request.state, "request_id", None),
+        errors=failed,
+    )
     return JSONResponse(status_code=422, content={"detail": errors})
 
 
@@ -561,8 +583,7 @@ def _reprocess_pending() -> None:
             write_log("alert_classify_failed", alert_id=row["id"], actor="system", result=type(exc).__name__)
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+def _on_startup() -> None:
     global _startup_thread
     escalation.threshold()  # falla al arrancar (no en la primera alerta) si el valor es invalido
     init_db()
@@ -573,7 +594,7 @@ def on_startup() -> None:
 # --- Endpoints -----------------------------------------------------------------
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def root(request: Request):
     # Sin log_action: es una ruta anonima y cada visita inflaria el log de auditoria.
     return """<!doctype html>

@@ -141,6 +141,21 @@ def test_outbound_blocks_are_not_a_scan():
         ufw("192.168.61.129", s, 3000 + s).replace("IN=ens33 OUT=", "IN= OUT=ens33")
         for s in range(30)
     ]
+    sig = run_ufw(out)
+    assert [x["rule"] for x in sig] == ["R5-salida-bloqueada-ufw"]  # nunca como R4
+    assert sig[0]["ip"] == "192.168.61.129" and "->192.168.61.129" in sig[0]["sample_requests"][0]
+
+
+def test_few_outbound_blocks_do_not_trigger_r5():
+    out = [ufw("192.168.61.129", s, 3000 + s).replace("IN=ens33 OUT=", "IN= OUT=ens33") for s in range(4)]
+    assert run_ufw(out) == []
+
+
+def test_outbound_multicast_is_not_r5():
+    out = [
+        ufw("192.168.61.129", s % 50, 5353, dst="224.0.0.251", proto="UDP").replace("IN=ens33 OUT=", "IN= OUT=ens33")
+        for s in range(30)
+    ]
     assert run_ufw(out) == []
 
 

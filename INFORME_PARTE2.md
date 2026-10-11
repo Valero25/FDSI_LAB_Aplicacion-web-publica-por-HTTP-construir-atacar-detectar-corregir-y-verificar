@@ -331,6 +331,10 @@ La validación de sintaxis también pasa: `nginx -t` en `nginx:1.28` → `syntax
 | 8 | `GET /` anonimo escribia en el audit log | Ya no se registra |
 | 9 | `enable --now` no reiniciaba la API tras actualizar el codigo | `systemctl restart` |
 | 10 | La copia vieja de `alerts.db` y `logs/` quedaba en el repositorio | El script la elimina tras migrar |
+| 11 | Las entradas invalidas (422) no dejaban rastro en `actions.log` | Accion `validation_error` con `request_id`, ruta, IP y solo `loc`/`type` de los campos que fallan |
+| 12 | El veto de fail2ban usaba `REJECT` (revela que hay firewall) | `banaction = ufw[blocktype=deny]`: descarte silencioso |
+| 13 | Sin alerta para bloqueos salientes del propio servidor | Regla R5 en `detect.py` (ufw `deny outgoing`) |
+| 14 | `HEAD /` devolvia 405 y `on_event("startup")` estaba obsoleto | `HEAD /` aceptado; arranque migrado a `lifespan` |
 
 **Falsos positivos y negativos de la deteccion**
 

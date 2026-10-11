@@ -569,3 +569,31 @@ def test_anonymous_root_does_not_write_to_audit_log(client):
         assert client.get("/").status_code == 200
     after = log.read_text(encoding="utf-8") if log.exists() else ""
     assert after == before  # un cliente anonimo no puede inflar el log de auditoria
+
+
+def test_validation_errors_are_audited_without_the_value(client):
+    rid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    r = client.post(
+        "/alerts",
+        json={**ALERT, "severity": "VALOR-SECRETO-XYZ"},
+        headers={**EMISOR, "X-Request-ID": rid},
+    )
+    assert r.status_code == 422
+    entry = _last_audit_entry("validation_error")
+    assert entry["request_id"] == rid and entry["result"] == "validation_error"
+    assert entry["method"] == "POST" and entry["path"] == "/alerts"
+    assert any(e["loc"][-1] == "severity" for e in entry["errors"])
+    assert all(set(e) == {"loc", "type"} for e in entry["errors"])
+    log_text = (main.LOG_DIR / "actions.log").read_text(encoding="utf-8")
+    assert "VALOR-SECRETO-XYZ" not in log_text
+
+
+def test_validation_audit_bounds_client_chosen_field_names(client):
+    client.post("/alerts", json={**ALERT, "x" * 500: 1}, headers=EMISOR)
+    entry = _last_audit_entry("validation_error")
+    assert all(len(part) <= 64 for e in entry["errors"] for part in e["loc"])
+
+
+def test_head_on_root_is_accepted(client):
+    r = client.head("/")
+    assert r.status_code == 200 and r.content == b""

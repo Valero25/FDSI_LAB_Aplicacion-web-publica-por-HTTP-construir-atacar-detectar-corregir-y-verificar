@@ -8,6 +8,10 @@ Reglas (ventana deslizante, por IP de origen):
 - R4 escaneo de puertos: >= UFW_UMBRAL conexiones bloqueadas por ufw ([UFW BLOCK]) desde una
   misma IP en la ventana (por defecto 5 en 300 s). Es la capa HOST: ve lo que Nginx no ve.
 
+- R5 salida bloqueada: >= UFW_UMBRAL paquetes SALIENTES del propio servidor bloqueados por ufw
+  ("deny outgoing") en la ventana. Indica que algo del servidor intenta conectarse a un destino
+  no permitido (software mal configurado o, en el peor caso, un proceso comprometido).
+
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
                              [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300] [--json]
@@ -53,12 +57,14 @@ UFW_RE = re.compile(
     r"\bPROTO=(?P<proto>[A-Z0-9]+)(?:.*?\bDPT=(?P<dpt>\d{1,5}))?"
 )
 UFW_BLOCK = 1000  # pseudo-status: los bloqueos de ufw no tienen codigo HTTP
+UFW_OUT_BLOCK = 1001  # bloqueo de un paquete que SALE del servidor
 
 RULES = {
     "R1-enumeracion-404": {404},
     "R2-fuerza-bruta-401-429": {401, 429},
     "R3-abuso-privilegios-403": {403},
     "R4-escaneo-ufw-block": {UFW_BLOCK},
+    "R5-salida-bloqueada-ufw": {UFW_OUT_BLOCK},
 }
 
 
@@ -102,9 +108,8 @@ def parse_ufw(lines):
         m = UFW_RE.match(line)
         if not m or _is_noise(m["dst"]):
             continue
-        if not m["in"]:
-            # IN= vacio: paquete SALIENTE bloqueado por "deny outgoing" (el propio servidor);
-            # no es un escaneo contra el servidor.
+        outbound = not m["in"]  # IN= vacio: paquete SALIENTE bloqueado por "deny outgoing"
+        if outbound and not m["out"]:
             continue
         try:
             ipaddress.ip_address(m["src"])
@@ -113,7 +118,10 @@ def parse_ufw(lines):
         ts = _ufw_timestamp(m["ts"])
         if ts is None:
             continue
-        yield m["src"], ts, UFW_BLOCK, f"{m['proto']}/{m['dpt'] or '-'}", None
+        if outbound:  # no es un escaneo contra el servidor: es R5, con el destino como evidencia
+            yield m["src"], ts, UFW_OUT_BLOCK, f"{m['proto']}/{m['dpt'] or '-'}->{m['dst']}", None
+        else:
+            yield m["src"], ts, UFW_BLOCK, f"{m['proto']}/{m['dpt'] or '-'}", None
 
 
 def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int = 5) -> list[dict]:
@@ -135,7 +143,7 @@ def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int =
             if end - start + 1 > best[0]:
                 best = (end - start + 1, start)
         count, first = best
-        limit = ufw_threshold if rule.startswith("R4") else threshold
+        limit = ufw_threshold if rule.startswith(("R4", "R5")) else threshold
         if count >= limit:
             window = hits[first : first + count]
             signals.append(
