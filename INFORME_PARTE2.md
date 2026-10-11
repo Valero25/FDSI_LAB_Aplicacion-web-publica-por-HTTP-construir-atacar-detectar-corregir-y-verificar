@@ -195,7 +195,7 @@ sudo openssl req -x509 -newkey rsa:3072 -nodes -days 365 \
 sudo chmod 600 /etc/ssl/private/lab3-server.key
 
 # 2. Secretos fuera del repositorio (G10, G14, G16)
-sudo install -m 640 -o root -g www-data deploy/muvautomation.env.example /etc/muvautomation.env
+sudo install -m 600 -o root -g root deploy/muvautomation.env.example /etc/muvautomation.env
 sudo sed -i "s/^MUV_API_KEY=.*/MUV_API_KEY=$(openssl rand -hex 32)/" /etc/muvautomation.env
 sudo sed -i "s/CAMBIAR_CLAVE_ANA/$(openssl rand -hex 32)/; s/CAMBIAR_CLAVE_JUAN/$(openssl rand -hex 32)/" /etc/muvautomation.env
 sudoedit /etc/muvautomation.env   # opcional: ABUSEIPDB_API_KEY (cuenta gratuita)

@@ -36,7 +36,11 @@ ALERT = {
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB_PATH", tmp_path / "alerts.db")
     main._auth_failures.clear()  # el bloqueo por IP no debe filtrarse entre pruebas
+    main._ingest_times.clear()  # ni el tope de ingesta por minuto
     with TestClient(main.app) as c:
+        # El reprocesado de pendientes del arranque corre en segundo plano: se espera para
+        # que las pruebas partan de alertas ya clasificadas.
+        main._startup_thread.join(timeout=10)
         yield c
 
 
@@ -264,7 +268,7 @@ def test_lockout_table_evicts_oldest_not_everything(monkeypatch):
 
     main._register_failure(Req())
     assert len(main._auth_failures) == 10_000
-    assert first not in main._auth_failures and "203.0.113.9" in main._auth_failures
+    assert first not in main._auth_failures and "analyst:203.0.113.9" in main._auth_failures
 
 
 # --- Cuotas y base de datos -----------------------------------------------------------
@@ -295,3 +299,264 @@ def test_data_and_log_dirs_come_from_env(tmp_path):
     env = {**os.environ, "MUV_DATA_DIR": str(tmp_path / "d"), "MUV_LOG_DIR": str(tmp_path / "l")}
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True).stdout
     assert str(tmp_path / "d" / "alerts.db") in out and (tmp_path / "l").is_dir()
+
+
+# --- Correcciones del analisis de vulnerabilidades (V-01 ... V-13) ------------------
+
+
+def test_late_classification_does_not_reopen_closed_alert(client):
+    # V-01: el motor corre en segundo plano y puede terminar despues de que el analista actuo.
+    alert_id = create(client)
+    assert client.post(f"/alerts/{alert_id}/actions", json={"action": "close"}, headers=ANA).status_code == 201
+    main.process_alert(alert_id)
+    detail = client.get(f"/alerts/{alert_id}", headers=ANA).json()
+    assert detail["status"] == "closed"
+    assert detail["risk_score"] is not None  # igual queda clasificada
+
+
+def test_late_classification_does_not_renotify_escalated_alert(client, monkeypatch):
+    alert_id = create(
+        client, severity="critical", tactic="Exfiltration", technique="T1041 - Exfiltration Over C2 Channel"
+    )
+    sent = []
+    monkeypatch.setattr(main.escalation, "notify", lambda alert, reason: sent.append(reason))
+    main.process_alert(alert_id)  # ya estaba escalada: no se vuelve a notificar
+    assert sent == []
+    assert client.get(f"/alerts/{alert_id}", headers=ANA).json()["status"] == "escalated"
+
+
+def test_trailing_slash_does_not_redirect_with_client_host(client):
+    # V-02: el Location del redirect de Starlette se construye con el header Host.
+    r = client.get("/alerts/", headers={**ANA, "Host": "evil.example"}, follow_redirects=False)
+    assert r.status_code == 404
+    assert "location" not in r.headers
+
+
+def test_concurrent_close_and_acknowledge_never_reopen(client):
+    # V-08: leer el estado y escribir la decision es atomico.
+    from concurrent.futures import ThreadPoolExecutor
+
+    ids = [create(client) for _ in range(12)]
+
+    def act(args):
+        alert_id, action = args
+        return client.post(f"/alerts/{alert_id}/actions", json={"action": action}, headers=ANA).status_code
+
+    jobs = [(i, a) for i in ids for a in ("acknowledge", "close")]
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        codes = list(pool.map(act, jobs))
+    assert set(codes) <= {201, 409}
+    for alert_id in ids:
+        assert client.get(f"/alerts/{alert_id}", headers=ANA).json()["status"] == "closed"
+
+
+def test_alert_quota_holds_under_concurrency(client, monkeypatch):
+    # V-08: el conteo de la cuota y el INSERT no admiten carreras.
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(main, "MAX_ALERTS", 8)  # el arranque ya siembra 3
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        codes = list(pool.map(lambda _: client.post("/alerts", json=ALERT, headers=EMISOR).status_code, range(20)))
+    assert codes.count(201) == 5 and codes.count(507) == 15
+    with main.get_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 8
+
+
+def test_lockout_scopes_are_independent(client):
+    # V-13: fallos con la clave del emisor no bloquean a los analistas de la misma IP.
+    for _ in range(main.MAX_AUTH_FAILURES):
+        assert client.post("/alerts", json=ALERT, headers={"X-API-Key": "x" * 20}).status_code == 401
+    assert client.post("/alerts", json=ALERT, headers=EMISOR).status_code == 429
+    assert client.get("/alerts", headers=ANA).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "value, ok",
+    [
+        ("clave-emisor-de-prueba-123456", True),
+        ("a" * 32, False),  # baja variedad
+        ("corta-123", False),
+        ("clave-emisor-local-123456", False),  # ejemplo del README
+        ("CAMBIAR_POR_VALOR_ALEATORIO", False),  # ejemplo de env.example
+    ],
+)
+def test_usable_secret(value, ok):
+    assert main.usable_secret(value) is ok
+
+
+@pytest.mark.parametrize("value", ["abc", "-1", "101", ""])
+def test_invalid_escalation_threshold_fails_at_startup(tmp_path, monkeypatch, value):
+    # V-07: un valor invalido debe detener el arranque, no romper en la primera alerta.
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "alerts.db")
+    monkeypatch.setenv("MUV_ESCALATION_THRESHOLD", value)
+    with pytest.raises(ValueError, match="MUV_ESCALATION_THRESHOLD"):
+        with TestClient(main.app):
+            pass
+
+
+def test_startup_does_not_wait_for_classification(tmp_path, monkeypatch):
+    # V-07: AbuseIPDB lento no debe retrasar el arranque de la API.
+    import threading
+
+    gate = threading.Event()
+    monkeypatch.setattr(main, "DB_PATH", tmp_path / "alerts.db")
+    monkeypatch.setattr(
+        main.enrichment, "classify", lambda alert: (gate.wait(10), (10, "baja", {"flags": []}))[1]
+    )
+    with TestClient(main.app) as c:  # entra sin esperar a que termine la clasificacion
+        assert main._startup_thread.is_alive()
+        assert c.get("/").status_code == 200
+        gate.set()
+        main._startup_thread.join(timeout=10)
+        assert not main._startup_thread.is_alive()
+
+
+def test_abuseipdb_cache_is_bounded(monkeypatch):
+    # V-10: un emisor no puede hacer crecer la cache sin limite.
+    monkeypatch.setenv("ABUSEIPDB_API_KEY", "x")
+    monkeypatch.setattr(enrichment, "ABUSEIPDB_CACHE_MAX", 3)
+    enrichment._abuse_cache.clear()
+    monkeypatch.setattr(
+        enrichment.urllib.request,
+        "urlopen",
+        _fake_response({"data": {"abuseConfidenceScore": 10, "totalReports": 1, "countryCode": "NL"}}),
+    )
+    for i in range(10):
+        assert enrichment.abuseipdb_check(f"203.0.114.{i + 20}")["status"] == "ok"
+    assert len(enrichment._abuse_cache) <= 3
+    enrichment._abuse_cache.clear()
+
+
+# --- Correlacion Nginx <-> app (request_id) -------------------------------------------
+
+
+def _last_audit_entry(action):
+    lines = (main.LOG_DIR / "actions.log").read_text(encoding="utf-8").splitlines()
+    return next(json.loads(l) for l in reversed(lines) if json.loads(l)["action"] == action)
+
+
+def test_request_id_is_echoed_and_logged(client):
+    rid = "0123456789abcdef0123456789abcdef"
+    r = client.get("/alerts", headers={**JUAN, "X-Request-ID": rid})
+    assert r.headers["x-request-id"] == rid
+    assert _last_audit_entry("list_alerts")["request_id"] == rid
+
+
+def test_request_id_is_generated_when_missing(client):
+    r = client.get("/")
+    rid = r.headers["x-request-id"]
+    assert len(rid) == 32 and int(rid, 16) >= 0
+    assert _last_audit_entry("view_root")["request_id"] == rid
+
+
+@pytest.mark.parametrize("hostile", ['x" , "result": "ok', "A" * 200, "../../etc/passwd", "0123456789ABCDEF0123456789ABCDEF"])
+def test_hostile_request_id_is_replaced(client, hostile):
+    # Sin Nginx por delante, un cliente podria intentar inyectar texto en el audit log.
+    r = client.get("/", headers={"X-Request-ID": hostile})
+    assert r.headers["x-request-id"] != hostile
+    entry = _last_audit_entry("view_root")
+    assert entry["request_id"] == r.headers["x-request-id"] and entry["result"] == "ok"
+
+
+def test_request_id_links_ingestion_and_classification(client):
+    rid = "fedcba9876543210fedcba9876543210"
+    r = client.post("/alerts", json=ALERT, headers={**EMISOR, "X-Request-ID": rid})
+    assert r.status_code == 201
+    assert _last_audit_entry("create_alert")["request_id"] == rid
+    assert _last_audit_entry("alert_classified")["request_id"] == rid
+
+
+# --- Texto libre, errores sin eco, IPv6, tope de ingesta -------------------------------
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"description": "rojo\x1b[31m"},  # secuencia ANSI
+        {"description": "a\x00b"},  # NUL
+        {"tactic": "Discovery\u202e"},  # override de direccion (trojan source)
+        {"technique": "T1046\nT1078 - Valid Accounts"},  # salto de linea en campo de una linea
+        {"hostname": "WEB-LAB-01"[:3] + "\u200b"},  # caracter invisible (ademas incumple el patron)
+    ],
+)
+def test_control_and_bidi_characters_are_rejected(client, overrides):
+    r = client.post("/alerts", json={**ALERT, **overrides}, headers=EMISOR)
+    assert r.status_code == 422
+
+
+def test_multiline_description_and_notes_are_allowed(client):
+    alert_id = create(client, description="linea 1\nlinea 2\tcon tabulador")
+    r = client.post(f"/alerts/{alert_id}/actions", json={"action": "comment", "note": "a\nb"}, headers=ANA)
+    assert r.status_code == 201
+    r = client.post(f"/alerts/{alert_id}/actions", json={"action": "comment", "note": "x\x1b[0m"}, headers=ANA)
+    assert r.status_code == 422
+
+
+def test_validation_errors_do_not_echo_input(client):
+    r = client.post("/alerts", json={**ALERT, "severity": "SECRETO-REFLEJADO"}, headers=EMISOR)
+    assert r.status_code == 422 and "SECRETO-REFLEJADO" not in r.text
+    r = client.get("/alerts", headers={"X-Analyst-Key": "clave-casi-correcta-" + "z" * 300})
+    assert r.status_code == 422 and "clave-casi-correcta" not in r.text
+
+
+def test_ipv6_failures_are_counted_per_64_prefix():
+    class Req:
+        def __init__(self, host):
+            self.client = type("C", (), {"host": host})()
+
+    a, b = main._lock_key(Req("2001:db8:1:2::1"), "analyst"), main._lock_key(Req("2001:db8:1:2:ffff::9"), "analyst")
+    other = main._lock_key(Req("2001:db8:1:3::1"), "analyst")
+    assert a == b and a != other
+    assert main._lock_key(Req("::ffff:203.0.113.9"), "analyst") == main._lock_key(Req("203.0.113.9"), "analyst")
+
+
+def test_ingest_rate_limit(client, monkeypatch):
+    monkeypatch.setattr(main, "MAX_INGEST_PER_MIN", 3)
+    codes = [client.post("/alerts", json=ALERT, headers=EMISOR).status_code for _ in range(5)]
+    assert codes == [201, 201, 201, 429, 429]
+    r = client.post("/alerts", json=ALERT, headers=EMISOR)
+    assert r.headers["retry-after"] == "60"
+
+
+def test_audit_path_is_truncated(client):
+    client.get("/" + "a" * 3000)
+    lines = (main.LOG_DIR / "actions.log").read_text(encoding="utf-8").splitlines()
+    # un 404 del router no pasa por log_action; se comprueba con un id invalido autenticado
+    client.get("/alerts/" + "b" * 3000, headers=JUAN)
+    assert all(len(json.loads(l)["path"]) <= 256 for l in lines if '"path"' in l)
+
+
+# --- Inventario de red (solo lectura) ---------------------------------------------------
+
+
+def test_network_inventory_requires_analyst(client):
+    assert client.get("/network/devices").status_code == 401
+    assert client.get("/network/devices", headers=EMISOR).status_code == 401
+    assert client.get("/network/devices", headers=JUAN).status_code == 200
+
+
+def test_network_inventory_content_and_filter(client):
+    devices = client.get("/network/devices", headers=JUAN).json()
+    assert len(devices) >= 3 and {d["type"] for d in devices} == {"firewall", "router", "switch"}
+    assert all(set(d) == set(devices[0]) for d in devices)
+    # Sin credenciales ni campos de secretos en el inventario.
+    assert not any(k in d for d in devices for k in ("password", "secret", "token", "credentials"))
+    only = client.get("/network/devices", params={"type": "firewall"}, headers=JUAN).json()
+    assert only and all(d["type"] == "firewall" for d in only)
+    assert client.get("/network/devices", params={"type": "toaster"}, headers=JUAN).status_code == 422
+    one = client.get("/network/devices/FW-LAB-01", headers=JUAN)
+    assert one.status_code == 200 and one.json()["id"] == "FW-LAB-01"
+
+
+def test_network_inventory_is_read_only(client):
+    for method in ("post", "put", "patch", "delete"):
+        r = client.request(method.upper(), "/network/devices", headers={**ANA, **EMISOR}, json={})
+        assert r.status_code == 405
+        r = client.request(method.upper(), "/network/devices/FW-LAB-01", headers=ANA, json={})
+        assert r.status_code == 405
+
+
+def test_network_device_id_is_validated(client):
+    assert client.get("/network/devices/NO-EXISTE-99", headers=JUAN).status_code == 404
+    assert client.get("/network/devices/..%2F..%2Fetc", headers=JUAN).status_code in (404, 422)
+    assert client.get("/network/devices/fw-lab-01", headers=JUAN).status_code == 422  # minusculas

@@ -23,7 +23,14 @@ if not notify_logger.handlers:
 
 
 def threshold() -> int:
-    return int(os.environ.get("MUV_ESCALATION_THRESHOLD", "70"))
+    raw = os.environ.get("MUV_ESCALATION_THRESHOLD", "70")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if not 0 <= value <= 100:
+        raise ValueError(f"MUV_ESCALATION_THRESHOLD debe ser un entero entre 0 y 100 (recibido: {raw!r})")
+    return value
 
 
 def should_escalate(risk_score: int) -> bool:

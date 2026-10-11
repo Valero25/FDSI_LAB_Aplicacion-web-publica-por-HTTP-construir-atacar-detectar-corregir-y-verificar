@@ -1,0 +1,9 @@
+# Instalar: sudo install -m 644 deploy/fail2ban/jail-sshd.local /etc/fail2ban/jail.d/sshd-lab3.local
+# harden-host.sh agrega a ignoreip la IP desde la que se ejecuta (para no autobloquear al administrador).
+[sshd]
+enabled   = true
+backend   = systemd
+maxretry  = 3
+findtime  = 10m
+bantime   = 1h
+ignoreip  = 127.0.0.1/8 ::1

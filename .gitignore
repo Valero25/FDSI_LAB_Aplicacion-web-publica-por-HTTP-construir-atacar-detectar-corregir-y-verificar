@@ -4,3 +4,13 @@ app/alerts.db
 logs/
 *.pyc
 .pytest_cache/
+.venv/
+**/.venv/
+.env
+*.env
+!deploy/muvautomation.env.example
+*.key
+*.pem
+*.db
+*.db-wal
+*.db-shm

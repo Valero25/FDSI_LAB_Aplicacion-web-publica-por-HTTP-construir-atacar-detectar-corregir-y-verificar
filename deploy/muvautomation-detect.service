@@ -1,0 +1,30 @@
+# Instalar: sudo install -m 644 deploy/muvautomation-detect.service /etc/systemd/system/
+# Ejecuta scripts/detect.py sobre el access.log de Nginx y el ufw.log (R4, escaneo de puertos). El script termina con codigo 2 si hay
+# senales: la unidad queda en estado "failed" (visible con `systemctl --failed`) y el detalle va
+# al journal (`journalctl -u muvautomation-detect`).
+[Unit]
+Description=MuvAutomation - deteccion de enumeracion, fuerza bruta y abuso de privilegios (access.log)
+
+[Service]
+Type=oneshot
+User=muvapi
+Group=muvapi
+# /var/log/nginx/access.log es root:adm 0640 en Ubuntu.
+SupplementaryGroups=adm
+WorkingDirectory=/opt/fdsi-lab3
+ExecStart=/opt/fdsi-lab3/.venv/bin/python -I scripts/detect.py /var/log/nginx/access.log --ufw-log /var/log/ufw.log
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
