@@ -211,11 +211,26 @@ sudo nginx -t && sudo systemctl reload nginx
 #    borrado de "OpenSSH ALLOW Anywhere", filtrado de salida (G15), sshd solo con llave (G4),
 #    fail2ban, auditd, sysctl, sandbox de Nginx, servicio con sandboxing y timer de deteccion.
 #    Ejecutar desde una sesion SSH con llave dentro del CIDR (el script aborta sin cambios si no).
-sudo LAB_CIDR=192.168.61.0/24 ADMIN_USER=$USER bash deploy/harden-host.sh
+sudo LAB_CIDR=192.168.61.0/24 ADMIN_USER=$USER SSH_CLIENT="$SSH_CLIENT" bash deploy/harden-host.sh
+#    SSH_CLIENT se pasa a mano porque sudo lo elimina (sin el, el script usa `who -m`).
 #    Con EGRESS_FILTER=no se omite el filtrado de salida si se necesita otro destino.
 ```
 
 El script es **idempotente**: tras un `git pull` basta repetirlo y reinicia la API. Reemplaza los pasos manuales de las versiones anteriores (reglas `ufw`, `sed` sobre `sshd_config` y `chmod -R o-rwx`, que ya no aplican porque el codigo pertenece a `root` y el servicio solo lo lee).
+
+El repositorio de GitHub quedó en **privado** (11-oct-2026). La VM lo clona con una **deploy key de solo lectura** y por **SSH sobre el puerto 443**, porque el filtrado de salida (G15) bloquea el 22 saliente:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/lab3_deploy -N ""      # agregar la .pub en GitHub: Settings > Deploy keys (sin write)
+cat >> ~/.ssh/config <<'EOF2'
+Host ssh.github.com
+  Port 443
+  IdentityFile ~/.ssh/lab3_deploy
+EOF2
+git remote set-url origin ssh://git@ssh.github.com:443/<usuario>/<repositorio>.git
+```
+
+Tras actualizar el codigo, verificar el banner: `sudo sshd -T | grep -i debianbanner` debe decir `no`, y `nmap -sV -p 22` desde Kali ya no debe mostrar el sufijo de Ubuntu.
 
 ---
 
@@ -309,10 +324,10 @@ La validación de sintaxis también pasa: `nginx -t` en `nginx:1.28` → `syntax
 | 1 | `harden-host.sh` no borraba `OpenSSH ALLOW Anywhere`: el `limit` quedaba debajo y SSH seguia abierto a todos | El script borra las reglas abiertas (22, 80, 443, OpenSSH, Nginx Full) y avisa si queda alguna |
 | 2 | El filtrado de salida (G15) era manual | El script lo aplica (53, 123/udp, 80, 443, 67/udp); `EGRESS_FILTER=no` lo omite |
 | 3 | R4 trataba los bloqueos salientes (`IN=` vacio) como escaneo | `parse_ufw` descarta las lineas con `IN=` vacio |
-| 4 | `detect.py` repetia la misma senal cada 5 min y la unidad quedaba en `failed` | `--state-file` recuerda lo reportado; `SuccessExitStatus=2` |
+| 4 | `detect.py` repetia la misma senal cada 5 min y la unidad quedaba en `failed` | `--state-file` recuerda lo reportado; `SuccessExitStatus=10` (el codigo 2 queda para errores de uso, asi un detector roto no parece exitoso) |
 | 5 | R4 sin margen: ufw limita el registro y solo escribio 10 de 198 puertos | Umbral por defecto 5 |
 | 6 | Latencia de deteccion de 5 min | Timer cada 1 min |
-| 7 | SSH revelaba version y distribucion | `DebianBanner no` (si la version de sshd lo soporta) |
+| 7 | SSH revelaba version y distribucion. La primera correccion **no se aplicaba**: `sshd -T \| grep -q` cerraba la tuberia antes de tiempo y, con `pipefail`, la condicion fallaba en silencio | La salida de `sshd -T` se guarda en una variable antes de buscar; el script avisa si `debianbanner` sigue en `yes` |
 | 8 | `GET /` anonimo escribia en el audit log | Ya no se registra |
 | 9 | `enable --now` no reiniciaba la API tras actualizar el codigo | `systemctl restart` |
 | 10 | La copia vieja de `alerts.db` y `logs/` quedaba en el repositorio | El script la elimina tras migrar |
