@@ -443,18 +443,18 @@ def test_request_id_is_echoed_and_logged(client):
 
 
 def test_request_id_is_generated_when_missing(client):
-    r = client.get("/")
+    r = client.get("/alerts", headers=JUAN)
     rid = r.headers["x-request-id"]
     assert len(rid) == 32 and int(rid, 16) >= 0
-    assert _last_audit_entry("view_root")["request_id"] == rid
+    assert _last_audit_entry("list_alerts")["request_id"] == rid
 
 
 @pytest.mark.parametrize("hostile", ['x" , "result": "ok', "A" * 200, "../../etc/passwd", "0123456789ABCDEF0123456789ABCDEF"])
 def test_hostile_request_id_is_replaced(client, hostile):
     # Sin Nginx por delante, un cliente podria intentar inyectar texto en el audit log.
-    r = client.get("/", headers={"X-Request-ID": hostile})
+    r = client.get("/alerts", headers={**JUAN, "X-Request-ID": hostile})
     assert r.headers["x-request-id"] != hostile
-    entry = _last_audit_entry("view_root")
+    entry = _last_audit_entry("list_alerts")
     assert entry["request_id"] == r.headers["x-request-id"] and entry["result"] == "ok"
 
 
@@ -560,3 +560,12 @@ def test_network_device_id_is_validated(client):
     assert client.get("/network/devices/NO-EXISTE-99", headers=JUAN).status_code == 404
     assert client.get("/network/devices/..%2F..%2Fetc", headers=JUAN).status_code in (404, 422)
     assert client.get("/network/devices/fw-lab-01", headers=JUAN).status_code == 422  # minusculas
+
+
+def test_anonymous_root_does_not_write_to_audit_log(client):
+    log = main.LOG_DIR / "actions.log"
+    before = log.read_text(encoding="utf-8") if log.exists() else ""
+    for _ in range(5):
+        assert client.get("/").status_code == 200
+    after = log.read_text(encoding="utf-8") if log.exists() else ""
+    assert after == before  # un cliente anonimo no puede inflar el log de auditoria

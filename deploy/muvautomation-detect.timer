@@ -5,8 +5,8 @@ Description=MuvAutomation - deteccion periodica sobre el access.log
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
-AccuracySec=30s
+OnUnitActiveSec=1min
+AccuracySec=10s
 
 [Install]
 WantedBy=timers.target

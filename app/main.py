@@ -575,7 +575,7 @@ def on_startup() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 def root(request: Request):
-    log_action(request, "view_root")
+    # Sin log_action: es una ruta anonima y cada visita inflaria el log de auditoria.
     return """<!doctype html>
 <html lang="es">
 <head><meta charset="utf-8"><title>MuvAutomation Falcon Lab</title></head>

@@ -33,6 +33,11 @@ if [ -f "$REPO/app/alerts.db" ] && [ ! -f /var/lib/muvautomation/alerts.db ]; th
   chown -R muvapi:muvapi /var/lib/muvautomation /var/log/muvautomation
   chmod 600 /var/lib/muvautomation/alerts.db*
 fi
+# Tras migrar, la copia vieja no debe quedar dentro del directorio del codigo (datos duplicados).
+if [ -f /var/lib/muvautomation/alerts.db ]; then
+  rm -f "$REPO"/app/alerts.db "$REPO"/app/alerts.db-wal "$REPO"/app/alerts.db-shm
+  rm -rf "$REPO/logs"
+fi
 # El codigo pasa a root: el servicio solo puede leerlo.
 chown -R root:root "$REPO"
 chmod -R go-w "$REPO"
@@ -57,6 +62,26 @@ ufw default deny incoming
 # Sin "enable" las reglas anteriores quedan guardadas pero no se aplican.
 ufw --force enable
 ufw status verbose | grep -q "^Status: active" || { echo "ERROR: ufw no quedo activo"; exit 1; }
+# Las reglas antiguas "OpenSSH ALLOW Anywhere" se evaluan ANTES que el limit y dejan SSH abierto a todos.
+# Ya existen los allow restringidos al CIDR (arriba), asi que borrarlas no deja sin acceso.
+ufw --force delete allow OpenSSH >/dev/null 2>&1 || true
+ufw --force delete allow 22/tcp >/dev/null 2>&1 || true
+ufw --force delete allow 22 >/dev/null 2>&1 || true
+ufw --force delete allow 80/tcp >/dev/null 2>&1 || true
+ufw --force delete allow 443/tcp >/dev/null 2>&1 || true
+ufw --force delete allow "Nginx Full" >/dev/null 2>&1 || true
+if ufw status | grep -E "^(22|OpenSSH)[^ ]* +(ALLOW|LIMIT) +Anywhere" >/dev/null; then
+  echo "AVISO: queda una regla de SSH abierta a Anywhere; revise: sudo ufw status numbered"
+fi
+# Filtrado de salida (G15): primero los allow out, despues el default deny. DNS, NTP, apt/HTTPS y DHCP.
+if [ "${EGRESS_FILTER:-yes}" = "yes" ]; then
+  ufw allow out 53
+  ufw allow out 123/udp
+  ufw allow out 80/tcp
+  ufw allow out 443/tcp
+  ufw allow out 67/udp
+  ufw default deny outgoing
+fi
 # Registra los bloqueos en /var/log/ufw.log: es la unica fuente de un escaneo SYN (regla R4 de detect.py).
 ufw logging medium
 ufw status numbered
@@ -69,6 +94,8 @@ SSHD_BACKUP="$(mktemp)"
 [ -f "$SSHD_DROPIN" ] && cp -a "$SSHD_DROPIN" "$SSHD_BACKUP" || : > "$SSHD_BACKUP"
 rm -f /etc/ssh/sshd_config.d/99-lab3.conf   # nombre usado por versiones anteriores del script
 install -m 644 "$REPO/deploy/sshd-hardening.conf" "$SSHD_DROPIN"
+# Oculta el sufijo de distribucion/paquete del banner SSH (solo si esta version de sshd lo soporta).
+if sshd -T 2>/dev/null | grep -qi '^debianbanner'; then echo "DebianBanner no" >> "$SSHD_DROPIN"; fi
 if ! sshd -t; then
   # Configuracion invalida: se restaura lo anterior para que un reinicio de sshd no falle.
   if [ -s "$SSHD_BACKUP" ]; then install -m 644 "$SSHD_BACKUP" "$SSHD_DROPIN"; else rm -f "$SSHD_DROPIN"; fi
@@ -130,7 +157,9 @@ fi
 echo "[7] Servicio"
 install -m 644 "$REPO/deploy/muvautomation-api.service" /etc/systemd/system/muvautomation-api.service
 systemctl daemon-reload
-systemctl enable --now muvautomation-api
-systemctl enable --now muvautomation-detect.timer
+systemctl enable muvautomation-api muvautomation-detect.timer
+# restart (no "enable --now"): tras un git pull, el codigo nuevo se carga aunque la API ya estuviera activa.
+systemctl restart muvautomation-api
+systemctl restart muvautomation-detect.timer
 systemd-analyze security muvautomation-api --no-pager | tail -3
 echo "Listo. Verifique: systemctl status muvautomation-api; sudo ufw status verbose; sudo sshd -T | grep -Ei 'passwordauth|permitroot'; systemctl list-timers muvautomation-detect.timer; sudo fail2ban-client status; sudo auditctl -l | head"

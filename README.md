@@ -98,7 +98,7 @@ app/
 scripts/
 └── build_mitre_index.py           # regenera el índice MITRE desde el bundle STIX oficial
 tests/
-└── test_api.py                    # 89 pruebas de los controles y de los motores
+└── test_api.py                    # pruebas de los controles y de los motores
 nginx/
 └── muvautomation.conf             # :80 -> 301, :443 TLS + hardening -> 127.0.0.1:8000
 deploy/
@@ -130,7 +130,7 @@ export ANA_KEY=$(python -c "import secrets; print(secrets.token_hex(16))")
 export MUV_ANALYSTS="ana:respondedor:$ANA_KEY;juan:lector:$(python -c "import secrets; print(secrets.token_hex(16))")"
 # export ABUSEIPDB_API_KEY=...     # opcional
 uvicorn app.main:app --reload
-python -m pytest -q                # 89 pruebas
+python -m pytest -q                # 92 pruebas (API + detección)
 ```
 
 En PowerShell: `$env:MUV_API_KEY = python -c "import secrets; print(secrets.token_hex(16))"` (igual para `$env:ANA_KEY` y `$env:MUV_ANALYSTS`).
@@ -166,5 +166,5 @@ curl -i http://127.0.0.1:8000/alerts                                # 401
 ## Estado del laboratorio
 
 - **Parte 1 — Fases A y B:** completa (ver [INFORME.md](INFORME.md)).
-- **Parte 2 — análisis de amenazas, hardening y motores:** implementada y probada con 89 pruebas automatizadas y un stack Nginx + TLS en Docker. Faltan las evidencias del servidor (ver [INFORME_PARTE2.md](INFORME_PARTE2.md)).
+- **Parte 2 — análisis de amenazas, hardening y motores:** implementada y probada con 92 pruebas automatizadas y un stack Nginx + TLS en Docker. Faltan las evidencias del servidor (ver [INFORME_PARTE2.md](INFORME_PARTE2.md)).
 - **Fases C–F** (ataque Red Team, detección Blue Team y verificación): pendientes.

@@ -96,7 +96,7 @@ def test_port_scan_in_ufw_log_triggers_r4():
 
 
 def test_few_blocks_do_not_trigger_r4():
-    assert run_ufw([ufw("192.168.61.50", s, 2000 + s) for s in range(9)]) == []
+    assert run_ufw([ufw("192.168.61.50", s, 2000 + s) for s in range(4)]) == []
 
 
 def test_multicast_and_broadcast_noise_is_ignored():
@@ -133,3 +133,26 @@ def test_signals_carry_request_ids_for_correlation():
     logs = [line("10.0.0.5", s, 404, f"/p{s}") + f' rid={rid}' for s in range(5)]
     sig = run(logs)
     assert sig[0]["request_ids"] == [rid]
+
+
+def test_outbound_blocks_are_not_a_scan():
+    # "deny outgoing": el propio servidor aparece como SRC con IN= vacio.
+    out = [
+        ufw("192.168.61.129", s, 3000 + s).replace("IN=ens33 OUT=", "IN= OUT=ens33")
+        for s in range(30)
+    ]
+    assert run_ufw(out) == []
+
+
+def test_state_file_does_not_repeat_reported_signals(tmp_path):
+    access = tmp_path / "access.log"
+    access.write_text(chr(10).join(line("10.0.0.5", s, 404, f"/x{s}") for s in range(6)), encoding="utf-8")
+    state = tmp_path / "state.json"
+    args = [str(access), "--state-file", str(state)]
+    assert detect.main(args) == 2  # primera vez: senal
+    assert detect.main(args) == 0  # mismo log: ya reportada
+    with access.open("a", encoding="utf-8") as fh:  # ataque nuevo, posterior
+        fh.write(chr(10) + chr(10).join(line("10.0.0.5", s, 404, f"/y{s}", minute=30) for s in range(6)))
+    assert detect.main(args) == 2
+    state.write_text("{no es json", encoding="utf-8")  # estado corrupto: se trata como vacio
+    assert detect.main(args) == 2

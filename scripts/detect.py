@@ -6,11 +6,11 @@ Reglas (ventana deslizante, por IP de origen):
 - R3 abuso de privilegios: >= UMBRAL respuestas 403 en la ventana (un lector que intenta
   escalate/close, o metodos HTTP no permitidos por Nginx).
 - R4 escaneo de puertos: >= UFW_UMBRAL conexiones bloqueadas por ufw ([UFW BLOCK]) desde una
-  misma IP en la ventana (por defecto 10 en 300 s). Es la capa HOST: ve lo que Nginx no ve.
+  misma IP en la ventana (por defecto 5 en 300 s). Es la capa HOST: ve lo que Nginx no ve.
 
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
-                             [--threshold 5] [--ufw-threshold 10] [--window 300] [--json]
+                             [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300] [--json]
 Codigo de salida: 0 sin senales, 2 con al menos una senal (util para cron/CI).
 Requiere `sudo ufw logging medium` para que R4 tenga datos.
 
@@ -30,6 +30,7 @@ Limitaciones y falsos positivos (documentar en el informe):
 """
 import argparse
 import json
+import os
 import re
 import sys
 import ipaddress
@@ -48,7 +49,7 @@ TS_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
 # se aceptan campos con forma de IP y de puerto.
 UFW_RE = re.compile(
     r"^(?P<ts>\d{4}-\d\d-\d\dT[\d:.]+(?:[+-]\d\d:\d\d|Z)|[A-Z][a-z]{2}\s+\d+ \d\d:\d\d:\d\d)\s.*"
-    r"\[UFW BLOCK\].*?\bSRC=(?P<src>[0-9a-fA-F:.]+)\s+DST=(?P<dst>[0-9a-fA-F:.]+).*?"
+    r"\[UFW BLOCK\]\s+IN=(?P<in>\S*)\s+OUT=(?P<out>\S*).*?\bSRC=(?P<src>[0-9a-fA-F:.]+)\s+DST=(?P<dst>[0-9a-fA-F:.]+).*?"
     r"\bPROTO=(?P<proto>[A-Z0-9]+)(?:.*?\bDPT=(?P<dpt>\d{1,5}))?"
 )
 UFW_BLOCK = 1000  # pseudo-status: los bloqueos de ufw no tienen codigo HTTP
@@ -101,6 +102,10 @@ def parse_ufw(lines):
         m = UFW_RE.match(line)
         if not m or _is_noise(m["dst"]):
             continue
+        if not m["in"]:
+            # IN= vacio: paquete SALIENTE bloqueado por "deny outgoing" (el propio servidor);
+            # no es un escaneo contra el servidor.
+            continue
         try:
             ipaddress.ip_address(m["src"])
         except ValueError:
@@ -111,7 +116,7 @@ def parse_ufw(lines):
         yield m["src"], ts, UFW_BLOCK, f"{m['proto']}/{m['dpt'] or '-'}", None
 
 
-def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int = 10) -> list[dict]:
+def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int = 5) -> list[dict]:
     """Aplica las reglas; una senal por (regla, IP) con la ventana de mayor concentracion."""
     by_key: dict[tuple[str, str], list[tuple[datetime, str, object]]] = defaultdict(list)
     for ip, ts, status, req, rid in events:
@@ -148,12 +153,55 @@ def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int =
     return sorted(signals, key=lambda s: (-s["count"], s["ip"]))
 
 
+def load_state(path: str) -> dict:
+    """Estado {"regla|ip": ISO del ultimo evento ya reportado}; ausente o corrupto = vacio."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        out = {}
+        for k, v in data.items():
+            if isinstance(k, str) and isinstance(v, str):
+                datetime.fromisoformat(v)  # descarta valores invalidos
+                out[k] = v
+        return out
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_state(path: str, state: dict, now: datetime, keep_days: int = 7) -> None:
+    keep = {}
+    for k, v in state.items():
+        try:
+            if (now - datetime.fromisoformat(v)).days < keep_days:
+                keep[k] = v
+        except (ValueError, TypeError):
+            continue
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(keep, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[AVISO] no se pudo guardar el estado en {path}: {exc.strerror}", file=sys.stderr)
+
+
+def drop_reported(events, state: dict):
+    """Quita los eventos ya cubiertos por una senal anterior: la misma alerta no se repite."""
+    for ev in events:
+        ip, ts, status = ev[0], ev[1], ev[2]
+        seen = [state.get(f"{rule}|{ip}") for rule, statuses in RULES.items() if status in statuses]
+        if any(v and ts <= datetime.fromisoformat(v) for v in seen):
+            continue
+        yield ev
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("logfile")
     ap.add_argument("--ufw-log", help="ufw.log (activa R4; requiere `ufw logging medium`)")
     ap.add_argument("--threshold", type=int, default=5)
-    ap.add_argument("--ufw-threshold", type=int, default=10)
+    ap.add_argument("--ufw-threshold", type=int, default=5)
+    ap.add_argument("--state-file", help="JSON con lo ya reportado: la misma senal no se repite en cada ejecucion")
     ap.add_argument("--window", type=int, default=300, help="segundos")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
@@ -166,7 +214,17 @@ def main(argv=None) -> int:
                 events += list(parse_ufw(fh))
         except OSError as exc:  # sin ufw.log solo se pierde R4; R1-R3 siguen funcionando
             print(f"[AVISO] R4 omitida: no se pudo leer {args.ufw_log}: {exc.strerror}", file=sys.stderr)
+    state = load_state(args.state_file) if args.state_file else {}
+    if state:
+        events = list(drop_reported(events, state))
     signals = detect(events, args.threshold, args.window, args.ufw_threshold)
+    if args.state_file and signals:
+        for s in signals:
+            # Todo lo visto hasta ahora para (regla, IP) queda como reportado.
+            state[f"{s['rule']}|{s['ip']}"] = max(
+                ev[1] for ev in events if ev[0] == s["ip"] and ev[2] in RULES[s["rule"]]
+            ).isoformat()
+        save_state(args.state_file, state, datetime.now(timezone.utc))
 
     for s in signals:
         if args.json:

@@ -201,37 +201,21 @@ sudo sed -i "s/CAMBIAR_CLAVE_ANA/$(openssl rand -hex 32)/; s/CAMBIAR_CLAVE_JUAN/
 sudoedit /etc/muvautomation.env   # opcional: ABUSEIPDB_API_KEY (cuenta gratuita)
 # Si quedan valores de ejemplo, la API los rechaza: fail closed.
 
-# 3. Servicio con sandboxing (G11)
-sudo cp deploy/muvautomation-api.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl restart muvautomation-api
-
-# 4. Nginx fortalecido (G1-G3, G5-G8, G12)
+# 3. Nginx fortalecido (G1-G3, G5-G8, G12)
 sudo cp nginx/muvautomation.conf /etc/nginx/sites-available/fdsi-lab3
+sudo ln -sf /etc/nginx/sites-available/fdsi-lab3 /etc/nginx/sites-enabled/fdsi-lab3
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 
-# 5. Firewall: PRIMERO los allow, DESPUÉS los delete (lección de la Parte 1, §7) (G4, G5)
-sudo ufw allow from 192.168.61.0/24 to any port 22 proto tcp
-sudo ufw allow from 192.168.61.0/24 to any port 443 proto tcp
-sudo ufw status numbered          # identificar los números de "OpenSSH ALLOW Anywhere" (v4 y v6)
-sudo ufw delete <n>               # borrar esas reglas, de la más alta a la más baja
-
-# 5b. Filtrado de salida (G15): primero los allow out, después el default deny
-sudo ufw allow out 53
-sudo ufw allow out 123/udp
-sudo ufw allow out 80/tcp         # apt
-sudo ufw allow out 443/tcp        # apt, AbuseIPDB
-sudo ufw default deny outgoing
-
-# 6. SSH solo con llave (G4) - probar primero la llave desde otra terminal
-sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/; s/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sudo sshd -t && sudo systemctl reload ssh
-
-# 7. Permisos mínimos (G12)
-sudo chmod -R o-rwx /opt/fdsi-lab3
-sudo chmod 640 /opt/fdsi-lab3/app/alerts.db /opt/fdsi-lab3/logs/actions.log
+# 4. Endurecimiento del host: usuario muvapi, DB/logs fuera del codigo, ufw (limit + deny),
+#    borrado de "OpenSSH ALLOW Anywhere", filtrado de salida (G15), sshd solo con llave (G4),
+#    fail2ban, auditd, sysctl, sandbox de Nginx, servicio con sandboxing y timer de deteccion.
+#    Ejecutar desde una sesion SSH con llave dentro del CIDR (el script aborta sin cambios si no).
+sudo LAB_CIDR=192.168.61.0/24 ADMIN_USER=$USER bash deploy/harden-host.sh
+#    Con EGRESS_FILTER=no se omite el filtrado de salida si se necesita otro destino.
 ```
 
-Además hay que volver a poner el repositorio de GitHub en **privado** y clonar con una deploy key (G12).
+El script es **idempotente**: tras un `git pull` basta repetirlo y reinicia la API. Reemplaza los pasos manuales de las versiones anteriores (reglas `ufw`, `sed` sobre `sshd_config` y `chmod -R o-rwx`, que ya no aplican porque el codigo pertenece a `root` y el servicio solo lo lee).
 
 ---
 
@@ -317,6 +301,33 @@ La validación de sintaxis también pasa: `nginx -t` en `nginx:1.28` → `syntax
 | `sudo ufw status verbose` | OpenSSH Anywhere (v4 y v6); `allow (outgoing)` | 22/80/443 solo desde `192.168.61.0/24`; `deny (outgoing)` con excepciones 53/123/80/443 | _pendiente_ |
 | `nmap -sV -p- 192.168.61.129` (desde Windows) | 22, 80 | 22, 80 (redirección), 443 | _pendiente_ |
 | `systemd-analyze security muvautomation-api` | puntaje base (≈9, "UNSAFE") | puntaje menor | _pendiente_ |
+
+### 9.4 Hallazgos de la prueba en las VM (11-oct-2026) y su correccion
+
+| # | Hallazgo | Correccion |
+|---|---|---|
+| 1 | `harden-host.sh` no borraba `OpenSSH ALLOW Anywhere`: el `limit` quedaba debajo y SSH seguia abierto a todos | El script borra las reglas abiertas (22, 80, 443, OpenSSH, Nginx Full) y avisa si queda alguna |
+| 2 | El filtrado de salida (G15) era manual | El script lo aplica (53, 123/udp, 80, 443, 67/udp); `EGRESS_FILTER=no` lo omite |
+| 3 | R4 trataba los bloqueos salientes (`IN=` vacio) como escaneo | `parse_ufw` descarta las lineas con `IN=` vacio |
+| 4 | `detect.py` repetia la misma senal cada 5 min y la unidad quedaba en `failed` | `--state-file` recuerda lo reportado; `SuccessExitStatus=2` |
+| 5 | R4 sin margen: ufw limita el registro y solo escribio 10 de 198 puertos | Umbral por defecto 5 |
+| 6 | Latencia de deteccion de 5 min | Timer cada 1 min |
+| 7 | SSH revelaba version y distribucion | `DebianBanner no` (si la version de sshd lo soporta) |
+| 8 | `GET /` anonimo escribia en el audit log | Ya no se registra |
+| 9 | `enable --now` no reiniciaba la API tras actualizar el codigo | `systemctl restart` |
+| 10 | La copia vieja de `alerts.db` y `logs/` quedaba en el repositorio | El script la elimina tras migrar |
+
+**Falsos positivos y negativos de la deteccion**
+
+- R1-R3: un usuario legitimo con enlaces rotos, o varias personas detras de una misma IP (NAT), pueden alcanzar el umbral; un ataque lento (menos de 5 por ventana) o distribuido entre IPs no se detecta.
+- R4: ufw limita su propio registro, asi que un escaneo muy rapido deja pocas lineas; por eso el umbral es bajo. Un escaneo hacia puertos permitidos (22/80/443) desde el CIDR no genera bloqueos y no se ve.
+- El timer revisa cada minuto: la deteccion no es en tiempo real.
+
+**Riesgos residuales aceptados**
+
+- El bloqueo por IP tras 5 claves invalidas afecta tambien a un analista legitimo que comparta IP con el atacante (decision de diseño, prioriza frenar la fuerza bruta).
+- La IP `192.168.61.129` esta fija en `nginx/muvautomation.conf` y en el certificado: si el DHCP la cambia, hay que regenerarlos (recomendado: reserva DHCP o IP estatica).
+- Parches pendientes del sistema operativo: `unattended-upgrades` aplica los de seguridad; conviene un `apt upgrade` antes de la entrega.
 
 ---
 
