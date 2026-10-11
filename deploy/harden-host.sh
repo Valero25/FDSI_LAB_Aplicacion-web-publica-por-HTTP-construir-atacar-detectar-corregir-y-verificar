@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Endurecimiento del host (V2, V3, V9, V10, V12, V14, V15). Idempotente. Ejecutar en el servidor:
-#   sudo LAB_CIDR=192.168.61.0/24 ADMIN_USER=<usuario_ssh> bash deploy/harden-host.sh
+#   sudo LAB_CIDR=192.168.61.0/24 ADMIN_USER=<usuario_ssh> SSH_CLIENT="$SSH_CLIENT" bash deploy/harden-host.sh
+# (sudo suele eliminar SSH_CLIENT: se pasa a mano; si llega vacio se intenta obtener con `who -m`.)
 # Orden seguro (leccion del incidente de ufw): primero se crean los allow, luego se cierra el resto.
 set -euo pipefail
 
@@ -8,6 +9,13 @@ set -euo pipefail
 : "${ADMIN_USER:?Defina ADMIN_USER (usuario que administra por SSH)}"
 REPO=/opt/fdsi-lab3
 [ "$(id -u)" -eq 0 ] || { echo "Ejecutar con sudo"; exit 1; }
+
+# IP de la sesion SSH: la usan la comprobacion contra LAB_CIDR y el ignoreip de fail2ban.
+if [ -z "${SSH_CLIENT:-}" ]; then
+  WHO_IP="$(who -m 2>/dev/null | sed -n 's/.*(\([0-9a-fA-F:.]*\)).*//p' | head -n1)"
+  if [ -n "$WHO_IP" ]; then SSH_CLIENT="$WHO_IP 0 22"; fi
+fi
+[ -n "${SSH_CLIENT:-}" ] || echo "AVISO: no se pudo determinar su IP SSH; no se valida contra LAB_CIDR ni se agrega a ignoreip de fail2ban."
 
 # Primero las comprobaciones que evitan quedar fuera del servidor: no se toca nada si fallan.
 KEYS="$(getent passwd "$ADMIN_USER" | cut -d: -f6)/.ssh/authorized_keys"
@@ -36,7 +44,8 @@ fi
 # Tras migrar, la copia vieja no debe quedar dentro del directorio del codigo (datos duplicados).
 if [ -f /var/lib/muvautomation/alerts.db ]; then
   rm -f "$REPO"/app/alerts.db "$REPO"/app/alerts.db-wal "$REPO"/app/alerts.db-shm
-  rm -rf "$REPO/logs"
+  # Los logs solo se borran si ya existen en el destino (nunca se pierde lo no copiado).
+  if [ -f /var/log/muvautomation/actions.log ]; then rm -rf "$REPO/logs"; fi
 fi
 # El codigo pasa a root: el servicio solo puede leerlo.
 chown -R root:root "$REPO"
@@ -70,7 +79,7 @@ ufw --force delete allow 22 >/dev/null 2>&1 || true
 ufw --force delete allow 80/tcp >/dev/null 2>&1 || true
 ufw --force delete allow 443/tcp >/dev/null 2>&1 || true
 ufw --force delete allow "Nginx Full" >/dev/null 2>&1 || true
-if ufw status | grep -E "^(22|OpenSSH)[^ ]* +(ALLOW|LIMIT) +Anywhere" >/dev/null; then
+if ufw status | grep -E "^(22(/tcp)?|OpenSSH)( \(v6\))? +(ALLOW|LIMIT) +Anywhere" >/dev/null; then
   echo "AVISO: queda una regla de SSH abierta a Anywhere; revise: sudo ufw status numbered"
 fi
 # Filtrado de salida (G15): primero los allow out, despues el default deny. DNS, NTP, apt/HTTPS y DHCP.
@@ -95,7 +104,8 @@ SSHD_BACKUP="$(mktemp)"
 rm -f /etc/ssh/sshd_config.d/99-lab3.conf   # nombre usado por versiones anteriores del script
 install -m 644 "$REPO/deploy/sshd-hardening.conf" "$SSHD_DROPIN"
 # Oculta el sufijo de distribucion/paquete del banner SSH (solo si esta version de sshd lo soporta).
-if sshd -T 2>/dev/null | grep -qi '^debianbanner'; then echo "DebianBanner no" >> "$SSHD_DROPIN"; fi
+SSHD_PROBE="$(sshd -T 2>/dev/null || true)"   # en variable: con pipefail, "grep -q" cortaria la tuberia (SIGPIPE)
+if grep -qi '^debianbanner' <<<"$SSHD_PROBE"; then echo "DebianBanner no" >> "$SSHD_DROPIN"; fi
 if ! sshd -t; then
   # Configuracion invalida: se restaura lo anterior para que un reinicio de sshd no falle.
   if [ -s "$SSHD_BACKUP" ]; then install -m 644 "$SSHD_BACKUP" "$SSHD_DROPIN"; else rm -f "$SSHD_DROPIN"; fi
@@ -108,6 +118,9 @@ systemctl reload ssh
 SSHD_EFFECTIVE="$(sshd -T)"   # en variable: con pipefail, "grep -q" cortaria la tuberia (SIGPIPE)
 grep -qi '^passwordauthentication no' <<<"$SSHD_EFFECTIVE" \
   || echo "ADVERTENCIA: PasswordAuthentication sigue activo; otro fragmento de sshd_config lo define antes (revise: sshd -T | grep -i passwordauthentication)"
+if grep -qi '^debianbanner yes' <<<"$SSHD_EFFECTIVE"; then
+  echo "ADVERTENCIA: DebianBanner sigue en yes; el banner SSH aun revela la distribucion (revise: sshd -T | grep -i debianbanner)"
+fi
 
 echo "[6] Rotacion de logs (V10), fail2ban (V12) y deteccion periodica (V-06)"
 install -m 644 "$REPO/deploy/logrotate-muvautomation" /etc/logrotate.d/muvautomation

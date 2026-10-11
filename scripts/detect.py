@@ -11,7 +11,7 @@ Reglas (ventana deslizante, por IP de origen):
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
                              [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300] [--json]
-Codigo de salida: 0 sin senales, 2 con al menos una senal (util para cron/CI).
+Codigo de salida: 0 sin senales, 10 con al menos una senal (2 queda para errores de uso).
 Requiere `sudo ufw logging medium` para que R4 tenga datos.
 
 Correlacion: el access.log de Nginx (log_format muv_combined) termina en rid=<request_id>; la
@@ -237,7 +237,7 @@ def main(argv=None) -> int:
             )
     if not signals:
         print("Sin senales con el umbral configurado.")
-    return 2 if signals else 0
+    return 10 if signals else 0
 
 
 if __name__ == "__main__":

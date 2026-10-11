@@ -57,7 +57,7 @@ def test_malformed_lines_are_skipped():
 def test_cli_exit_codes(tmp_path):
     log = tmp_path / "access.log"
     log.write_text("\n".join(line("10.0.0.5", s, 404) for s in range(5)), encoding="utf-8")
-    assert detect.main([str(log)]) == 2
+    assert detect.main([str(log)]) == 10
     log.write_text(line("10.0.0.5", 0, 200), encoding="utf-8")
     assert detect.main([str(log)]) == 0
 
@@ -124,7 +124,7 @@ def test_cli_combines_nginx_and_ufw_logs(tmp_path):
     access.write_text(line("10.0.0.5", 0, 200), encoding="utf-8")
     ufw_log = tmp_path / "ufw.log"
     ufw_log.write_text(chr(10).join(ufw("10.0.0.9", s, 4000 + s) for s in range(10)), encoding="utf-8")
-    assert detect.main([str(access), "--ufw-log", str(ufw_log)]) == 2
+    assert detect.main([str(access), "--ufw-log", str(ufw_log)]) == 10
     assert detect.main([str(access), "--ufw-log", str(tmp_path / "no-existe.log")]) == 0  # R4 omitida, sin caerse
 
 
@@ -149,10 +149,10 @@ def test_state_file_does_not_repeat_reported_signals(tmp_path):
     access.write_text(chr(10).join(line("10.0.0.5", s, 404, f"/x{s}") for s in range(6)), encoding="utf-8")
     state = tmp_path / "state.json"
     args = [str(access), "--state-file", str(state)]
-    assert detect.main(args) == 2  # primera vez: senal
+    assert detect.main(args) == 10  # primera vez: senal
     assert detect.main(args) == 0  # mismo log: ya reportada
     with access.open("a", encoding="utf-8") as fh:  # ataque nuevo, posterior
         fh.write(chr(10) + chr(10).join(line("10.0.0.5", s, 404, f"/y{s}", minute=30) for s in range(6)))
-    assert detect.main(args) == 2
+    assert detect.main(args) == 10
     state.write_text("{no es json", encoding="utf-8")  # estado corrupto: se trata como vacio
-    assert detect.main(args) == 2
+    assert detect.main(args) == 10
