@@ -496,7 +496,8 @@ def test_validation_errors_do_not_echo_input(client):
     r = client.post("/alerts", json={**ALERT, "severity": "SECRETO-REFLEJADO"}, headers=EMISOR)
     assert r.status_code == 422 and "SECRETO-REFLEJADO" not in r.text
     r = client.get("/alerts", headers={"X-Analyst-Key": "clave-casi-correcta-" + "z" * 300})
-    assert r.status_code == 422 and "clave-casi-correcta" not in r.text
+    # Una cabecera sobredimensionada es una credencial invalida: 401 (y cuenta como fallo), sin eco.
+    assert r.status_code == 401 and "clave-casi-correcta" not in r.text
 
 
 def test_ipv6_failures_are_counted_per_64_prefix():
@@ -597,3 +598,58 @@ def test_validation_audit_bounds_client_chosen_field_names(client):
 def test_head_on_root_is_accepted(client):
     r = client.head("/")
     assert r.status_code == 200 and r.content == b""
+
+
+# --- 422 solo para peticiones autenticadas ---------------------------------------------
+
+BROKEN = {"content": b"{esto no es json", "headers": {"Content-Type": "application/json"}}
+
+
+def _audit_actions():
+    lines = (main.LOG_DIR / "actions.log").read_text(encoding="utf-8").splitlines()
+    return [json.loads(l) for l in lines]
+
+
+def test_broken_json_without_key_is_401_not_422(client):
+    before = [e["action"] for e in _audit_actions()].count("validation_error")  # el log es compartido
+    r = client.post("/alerts", content=BROKEN["content"], headers=BROKEN["headers"])
+    assert r.status_code == 401
+    actions = [e["action"] for e in _audit_actions()]
+    assert actions[-1] == "create_alert_unauthorized"  # mismo evento que cualquier clave invalida
+    assert actions.count("validation_error") == before  # un anonimo no escribe validation_error
+
+
+def test_broken_json_with_valid_key_is_422_with_actor(client):
+    r = client.post("/alerts", content=BROKEN["content"], headers={**BROKEN["headers"], **EMISOR})
+    assert r.status_code == 422
+    entry = _last_audit_entry("validation_error")
+    assert entry["actor"] == "emisor:falcon-api-key"
+
+
+def test_broken_json_without_key_counts_towards_lockout(client):
+    codes = [client.post("/alerts", content=BROKEN["content"], headers=BROKEN["headers"]).status_code for _ in range(5)]
+    assert codes == [401] * 5
+    # Bloqueada la IP: ni siquiera una clave valida pasa (mismo comportamiento que sin JSON roto).
+    r = client.post("/alerts", json=ALERT, headers=EMISOR)
+    assert r.status_code == 429
+    r = client.post("/alerts", content=BROKEN["content"], headers={**BROKEN["headers"], **EMISOR})
+    assert r.status_code == 429
+
+
+def test_analyst_routes_validation_requires_valid_key(client):
+    alert_id = create(client)
+    url = f"/alerts/{alert_id}/actions"
+    r = client.post(url, content=BROKEN["content"], headers=BROKEN["headers"])
+    assert r.status_code == 401
+    r = client.post(url, content=BROKEN["content"], headers={**BROKEN["headers"], **ANA})
+    assert r.status_code == 422
+    assert _last_audit_entry("validation_error")["actor"] == "analyst:ana"
+    r = client.get("/alerts", params={"status": "inventado"}, headers=JUAN)
+    assert r.status_code == 422
+    assert _last_audit_entry("validation_error")["actor"] == "analyst:juan"
+
+
+def test_analyst_and_emitter_lockouts_stay_separate_for_validation(client):
+    for _ in range(5):
+        client.post("/alerts/x/actions", content=BROKEN["content"], headers=BROKEN["headers"])
+    assert client.post("/alerts", json=ALERT, headers=EMISOR).status_code == 201

@@ -334,6 +334,7 @@ La validación de sintaxis también pasa: `nginx -t` en `nginx:1.28` → `syntax
 | 11 | Las entradas invalidas (422) no dejaban rastro en `actions.log` | Accion `validation_error` con `request_id`, ruta, IP y solo `loc`/`type` de los campos que fallan |
 | 12 | El veto de fail2ban usaba `REJECT` (revela que hay firewall) | `banaction = ufw[blocktype=deny]` en los jails `muvautomation` y `sshd`: descarte silencioso |
 | 13 | Sin alerta para bloqueos salientes del propio servidor | Regla R5 en `detect.py` (ufw `deny outgoing`) |
+| 15 | Un JSON roto sin clave recibia 422 y escribia `validation_error` (FastAPI analiza el cuerpo antes de autenticar); anonimo y emisor eran indistinguibles (`actor: null`) | El handler de 422 comprueba antes la credencial: sin ella, 401 + `*_unauthorized` + cuenta para el bloqueo; con ella, 422 y `validation_error` con el actor real |
 | 14 | `HEAD /` devolvia 405 y `on_event("startup")` estaba obsoleto | `HEAD /` aceptado; arranque migrado a `lifespan` |
 
 **Falsos positivos y negativos de la deteccion**

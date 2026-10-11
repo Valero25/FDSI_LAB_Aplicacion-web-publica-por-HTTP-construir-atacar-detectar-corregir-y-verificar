@@ -367,8 +367,18 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     # El 422 por defecto de FastAPI devuelve el valor enviado ("input"): una clave casi correcta o
     # un dato sensible quedaria reflejado. Solo se informa donde y por que falla.
     errors = [{"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in exc.errors()]
-    # Rastro de auditoria: ruta, IP, request_id y QUE campos fallaron (loc/type). Nunca el valor
-    # enviado. loc puede contener nombres de campo elegidos por el cliente: se acotan.
+    # FastAPI analiza el cuerpo ANTES de ejecutar las dependencias de autenticacion: un JSON roto
+    # llegaria aqui sin credencial. Un anonimo no debe obtener un 422 ni escribir en el audit log:
+    # se trata como cualquier otro intento sin credencial valida (401, mismo contador y bloqueo).
+    scope = _auth_scope(request)
+    if scope is not None:
+        actor = _authenticate_or_reject(request, scope)
+        if isinstance(actor, JSONResponse):
+            return actor
+    else:
+        actor = None
+    # Rastro de auditoria: ruta, IP, request_id, actor y QUE campos fallaron (loc/type). Nunca el
+    # valor enviado. loc puede contener nombres de campo elegidos por el cliente: se acotan.
     failed = [
         {"loc": [str(part)[:64] for part in e["loc"][:6]], "type": str(e["type"])[:64]} for e in errors[:10]
     ]
@@ -377,7 +387,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         method=request.method,
         path=request.url.path[:256],
         client_ip=request.client.host if request.client else None,
-        actor=None,
+        actor=actor,
         result="validation_error",
         request_id=getattr(request.state, "request_id", None),
         errors=failed,
@@ -469,13 +479,63 @@ def _register_failure(request: Request, scope: str = "analyst") -> None:
         _auth_failures.setdefault(ip, []).append(time.monotonic())
 
 
+EMITTER_ACTOR = "emisor:falcon-api-key"
+
+
+def _emitter_key_ok(key: Optional[str]) -> bool:
+    return bool(API_KEY) and key is not None and secrets.compare_digest(key.encode(), API_KEY.encode())
+
+
+def _find_analyst(key: Optional[str]) -> Optional[Analyst]:
+    if key is None:
+        return None
+    # Se recorren todas las claves sin cortar antes: tiempo constante respecto a cual acierta.
+    found = None
+    for known, analyst in ANALYSTS.items():
+        if secrets.compare_digest(key.encode(), known.encode()):
+            found = analyst
+    return found
+
+
+def _auth_scope(request: Request) -> Optional[str]:
+    """Que credencial exige la ruta (None = ruta publica). Debe coincidir con las dependencias."""
+    path = request.url.path
+    if path == "/alerts" and request.method == "POST":
+        return "emitter"
+    if path == "/alerts" or path.startswith("/alerts/") or path.startswith("/network/"):
+        return "analyst"
+    return None
+
+
+def _authenticate_or_reject(request: Request, scope: str):
+    """Para el handler de 422: devuelve el actor si la credencial es valida, o una respuesta 429/401."""
+    lock_action = "create_alert_locked_out" if scope == "emitter" else "analyst_locked_out"
+    try:
+        _check_not_locked(request, lock_action, scope)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+    # Las cabeceras de mas de 256 caracteres ya son invalidas (mismo limite que las dependencias).
+    if scope == "emitter":
+        key = request.headers.get("x-api-key")
+        if key is not None and len(key) <= 256 and _emitter_key_ok(key):
+            return EMITTER_ACTOR
+        _register_failure(request, "emitter")
+        log_action(request, "create_alert_unauthorized", result="unauthorized")
+        return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    key = request.headers.get("x-analyst-key")
+    analyst = _find_analyst(key) if key is not None and len(key) <= 256 else None
+    if analyst:
+        return f"analyst:{analyst.name}"
+    _register_failure(request)
+    log_action(request, "analyst_unauthorized", result="unauthorized")
+    return JSONResponse(status_code=401, content={"detail": "Invalid or missing analyst key"})
+
+
 def require_api_key(
     request: Request, x_api_key: Optional[str] = Header(default=None, max_length=256)
 ) -> None:
     _check_not_locked(request, "create_alert_locked_out", "emitter")
-    if not API_KEY or x_api_key is None or not secrets.compare_digest(
-        x_api_key.encode(), API_KEY.encode()
-    ):
+    if not _emitter_key_ok(x_api_key):
         _register_failure(request, "emitter")
         log_action(request, "create_alert_unauthorized", result="unauthorized")
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
@@ -485,14 +545,9 @@ def require_analyst(
     request: Request, x_analyst_key: Optional[str] = Header(default=None, max_length=256)
 ) -> Analyst:
     _check_not_locked(request, "analyst_locked_out", "analyst")
-    if x_analyst_key is not None:
-        # Se recorren todas las claves sin cortar antes: tiempo constante respecto a cual acierta.
-        found = None
-        for key, analyst in ANALYSTS.items():
-            if secrets.compare_digest(x_analyst_key.encode(), key.encode()):
-                found = analyst
-        if found:
-            return found
+    found = _find_analyst(x_analyst_key)
+    if found:
+        return found
     _register_failure(request)
     log_action(request, "analyst_unauthorized", result="unauthorized")
     raise HTTPException(status_code=401, detail="Invalid or missing analyst key")
