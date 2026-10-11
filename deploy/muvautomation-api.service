@@ -54,6 +54,10 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 LimitNOFILE=4096
 TasksMax=128
+# Argon2 usa ~64 MiB por verificacion (maximo 2 a la vez, ver identity.ARGON2_CONCURRENCY): este tope
+# evita que el login agote la memoria de la VM y deja margen para el resto del servicio.
+MemoryHigh=384M
+MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target

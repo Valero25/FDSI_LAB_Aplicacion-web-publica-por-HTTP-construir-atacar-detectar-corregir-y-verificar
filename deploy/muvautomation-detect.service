@@ -13,7 +13,7 @@ Group=muvapi
 # /var/log/nginx/access.log es root:adm 0640 en Ubuntu.
 SupplementaryGroups=adm
 WorkingDirectory=/opt/fdsi-lab3
-ExecStart=/opt/fdsi-lab3/.venv/bin/python -I scripts/detect.py /var/log/nginx/access.log --ufw-log /var/log/ufw.log --state-file /var/lib/muvautomation-detect/state.json
+ExecStart=/opt/fdsi-lab3/.venv/bin/python -I scripts/detect.py /var/log/nginx/access.log --ufw-log /var/log/ufw.log --audit-log /var/log/muvautomation/actions.log --state-file /var/lib/muvautomation-detect/state.json
 SuccessExitStatus=10
 StateDirectory=muvautomation-detect
 StateDirectoryMode=0750

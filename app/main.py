@@ -36,6 +36,8 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.exceptions import RequestValidationError
 from fastapi import Path as PathParam
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.routing import APIRoute
+from starlette.routing import Match
 from pydantic import BaseModel, Field, IPvAnyAddress, field_validator
 
 from app import enrichment, escalation, identity, inventory
@@ -537,14 +539,22 @@ def _resolve_analyst(request: Request) -> Optional[Analyst]:
 
 
 def _auth_scope(request: Request) -> Optional[str]:
-    """Que credencial exige la ruta (None = ruta publica). Debe coincidir con las dependencias."""
-    path = request.url.path
-    if path == "/alerts" and request.method == "POST":
-        return "emitter"
-    if path in ("/auth/login", "/auth/refresh"):
-        return "login"
-    if path == "/alerts" or path.startswith("/alerts/") or path.startswith("/network/") or path == "/auth/logout":
-        return "analyst"
+    """Que credencial exige la ruta (None = ruta publica), segun la ruta que coincide y sus
+    dependencias: no depende del texto de la URL ni de mantener una lista aparte."""
+    for route in request.app.router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        match, _child = route.matches(request.scope)
+        if match != Match.FULL:
+            continue
+        if route.endpoint in LOGIN_ENDPOINTS:
+            return "login"
+        calls = {dep.call for dep in route.dependant.dependencies}
+        if require_api_key in calls:
+            return "emitter"
+        if require_analyst in calls:
+            return "analyst"
+        return None
     return None
 
 
@@ -913,7 +923,9 @@ def login(body: LoginIn, request: Request):
     actor = f"login:{body.username.lower()}"
     with get_db() as conn:
         try:
-            user, amr = identity.authenticate(conn, body.username, body.password, body.otp)
+            user, amr = identity.authenticate(
+                conn, body.username, body.password, body.otp, client_ip=_client_ip(request)
+            )
         except identity.Throttled as wait:
             log_action(request, "login_throttled", actor=actor, result="locked_out")
             raise HTTPException(
@@ -924,8 +936,8 @@ def login(body: LoginIn, request: Request):
             _register_failure(request, "login")
             log_action(request, "login_failed", actor=actor, result="unauthorized")
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        access, _jti, ttl = identity.issue_access_token(user, amr)
-        refresh_token = identity.issue_refresh_token(conn, user["username"], amr)
+        refresh_token, sid = identity.issue_refresh_token(conn, user["username"], amr)
+        access, _jti, ttl = identity.issue_access_token(user, amr, sid)
         conn.commit()
     log_action(request, "login_ok", actor=f"analyst:{user['username']}")
     return TokenOut(access_token=access, expires_in=ttl, refresh_token=refresh_token)
@@ -937,7 +949,7 @@ def refresh(body: RefreshIn, request: Request):
     _identity_or_503(request)
     with get_db() as conn:
         try:
-            user, amr, new_refresh = identity.rotate_refresh_token(conn, body.refresh_token)
+            user, amr, new_refresh, sid = identity.rotate_refresh_token(conn, body.refresh_token)
         except identity.RefreshReuse as reuse:
             _register_failure(request, "login")
             log_action(request, "refresh_reuse_detected", actor=f"analyst:{reuse.username}", result="unauthorized")
@@ -946,17 +958,21 @@ def refresh(body: RefreshIn, request: Request):
             _register_failure(request, "login")
             log_action(request, "refresh_failed", result="unauthorized")
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        access, _jti, ttl = identity.issue_access_token(user, amr)
+        access, _jti, ttl = identity.issue_access_token(user, amr, sid)
     log_action(request, "refresh_ok", actor=f"analyst:{user['username']}")
     return TokenOut(access_token=access, expires_in=ttl, refresh_token=new_refresh)
+
+
+LOGIN_ENDPOINTS = {login, refresh}  # el cuerpo mal formado en estas rutas cuenta como intento fallido
 
 
 @app.post("/auth/logout", status_code=204)
 def logout(request: Request, body: Optional[LogoutIn] = None, analyst: Analyst = Depends(require_analyst)):
     principal = getattr(request.state, "principal", None)
     with get_db() as conn:
-        if principal is not None:  # sesion por token: se revoca el token de acceso en uso
+        if principal is not None:  # sesion por token: se cierra la sesion completa y el token en uso
             identity.revoke_access_token(conn, principal.jti, principal.exp)
+            identity.revoke_session(conn, principal.sid)  # tambien su token de renovacion, siempre
         if body and body.refresh_token:
             identity.revoke_family_of(conn, body.refresh_token)
         conn.commit()

@@ -39,9 +39,14 @@ def _forge(claims_override=None, key=None, algorithm="EdDSA", headers=None):
     claims = {
         "iss": identity.ISSUER, "aud": identity.AUDIENCE, "sub": "marta", "roles": ["lector"],
         "amr": ["pwd"], "iat": now, "nbf": now, "exp": now + 300, "jti": "forjado-1",
+        "sid": "sesion-inexistente",
     }
     claims.update(claims_override or {})
     return jwt.encode(claims, key or identity._private_key(), algorithm=algorithm, headers=headers)
+
+
+def _sid_of(access_token):
+    return jwt.decode(access_token, options={"verify_signature": False})["sid"]
 
 
 # --- Alta y almacenamiento ------------------------------------------------------------
@@ -168,7 +173,7 @@ def test_throttle_is_stored_in_the_database(client):
     for _ in range(identity.THROTTLE_FREE_ATTEMPTS):
         _login(client, username="fantasma", password="incorrecta-larga-123")
     with main.get_db() as conn:
-        row = conn.execute("SELECT failures FROM login_throttle WHERE username = 'fantasma'").fetchone()
+        row = conn.execute("SELECT failures FROM login_throttle WHERE username = 'fantasma|testclient'").fetchone()
     assert row["failures"] == identity.THROTTLE_FREE_ATTEMPTS
 
 
@@ -202,6 +207,8 @@ def test_forged_and_malformed_tokens_are_rejected(client):
         "emisor incorrecto": _forge({"iss": "otro"}),
         "expirado": _forge({"exp": int(time.time()) - 600, "iat": int(time.time()) - 900}),
         "sin jti": _forge({"jti": None}),
+        "sin sesion": _forge({"sid": None}),
+        "sesion inexistente": _forge({"sid": "no-existe"}),
         "basura": "esto.no.es-un-jwt",
     }
     for name, token in cases.items():
@@ -226,14 +233,16 @@ def test_valid_forged_claims_need_an_existing_user(client):
 
 
 def test_respondedor_token_without_second_factor_is_rejected(client):
-    _create("rosa", "respondedor")
-    token = _forge({"sub": "rosa", "roles": ["respondedor"], "amr": ["pwd"]})
+    secret = _create("rosa", "respondedor")
+    sid = _sid_of(_login(client, "rosa", otp=pyotp.TOTP(secret).now()).json()["access_token"])
+    token = _forge({"sub": "rosa", "roles": ["respondedor"], "amr": ["pwd"], "sid": sid})  # sesion real
     assert client.get("/alerts", headers=_bearer(token)).status_code == 401
 
 
 def test_role_comes_from_the_database_not_from_the_token(client):
     _create("marta", "lector")
-    token = _forge({"sub": "marta", "roles": ["respondedor"], "amr": ["pwd", "otp"]})
+    sid = _sid_of(_login(client).json()["access_token"])
+    token = _forge({"sub": "marta", "roles": ["respondedor"], "amr": ["pwd", "otp"], "sid": sid})
     alert_id = base.create(client)
     r = client.post(f"/alerts/{alert_id}/actions", json={"action": "close", "note": "x"}, headers=_bearer(token))
     assert r.status_code == 403
@@ -413,3 +422,199 @@ def test_cli_gen_keys_produces_usable_keys(tmp_path, monkeypatch):
     assert code == 0 and set(values) == {"MUV_JWT_PRIVATE_KEY", "MUV_TOTP_KEY"}
     assert len(base64.b64decode(values["MUV_JWT_PRIVATE_KEY"])) == 32
     Fernet(values["MUV_TOTP_KEY"].encode())  # no lanza: clave Fernet valida
+
+
+# --- Cierre de sesion completo, sesiones y espera por IP ------------------------------------------
+
+
+def test_logout_without_refresh_token_still_ends_the_whole_session(client):
+    _create()
+    tokens = _login(client).json()
+    assert client.post("/auth/logout", headers=_bearer(tokens["access_token"])).status_code == 204
+    # El cliente no envio el token de renovacion: aun asi la sesion queda cerrada.
+    assert client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
+
+
+def test_password_change_kills_open_sessions_immediately(client):
+    _create()
+    tokens = _login(client).json()
+    with main.get_db() as conn:
+        identity.set_password(conn, "marta", "otra-contrasena-larga-77")
+    assert client.get("/alerts", headers=_bearer(tokens["access_token"])).status_code == 401
+    assert client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
+    assert _login(client, password="otra-contrasena-larga-77").status_code == 200
+
+
+def test_resetting_totp_kills_open_sessions(client):
+    secret = _create("rosa", "respondedor")
+    tokens = _login(client, "rosa", otp=pyotp.TOTP(secret).now()).json()
+    assert client.get("/alerts", headers=_bearer(tokens["access_token"])).status_code == 200
+    with main.get_db() as conn:
+        identity.enroll_totp(conn, "rosa")  # dispositivo comprometido: se reinicia el segundo factor
+    assert client.get("/alerts", headers=_bearer(tokens["access_token"])).status_code == 401
+    assert client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
+
+
+def test_refresh_reuse_also_kills_the_access_token(client):
+    _create()
+    first = _login(client).json()
+    newer = client.post("/auth/refresh", json={"refresh_token": first["refresh_token"]}).json()
+    client.post("/auth/refresh", json={"refresh_token": first["refresh_token"]})  # reutilizacion
+    assert client.get("/alerts", headers=_bearer(newer["access_token"])).status_code == 401
+
+
+def test_session_has_an_absolute_lifetime(client):
+    _create()
+    tokens = _login(client).json()
+    with main.get_db() as conn:
+        conn.execute("UPDATE refresh_tokens SET session_start = ?", (time.time() - identity.MAX_SESSION_S - 60,))
+        conn.commit()
+    # Aunque el token de renovacion no ha vencido, la sesion es demasiado vieja: a autenticarse de nuevo.
+    assert client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]}).status_code == 401
+    assert client.get("/alerts", headers=_bearer(tokens["access_token"])).status_code == 401
+
+
+def test_refresh_keeps_the_original_session_start(client):
+    _create()
+    first = _login(client).json()
+    with main.get_db() as conn:
+        start = conn.execute("SELECT session_start FROM refresh_tokens").fetchone()[0]
+    client.post("/auth/refresh", json={"refresh_token": first["refresh_token"]})
+    with main.get_db() as conn:
+        starts = {r[0] for r in conn.execute("SELECT session_start FROM refresh_tokens")}
+    assert starts == {start}  # renovar no reinicia el reloj de la sesion
+
+
+def test_throttle_is_per_account_and_ip_so_a_holder_is_not_locked_out(client):
+    _create()
+    with main.get_db() as conn:
+        for _ in range(identity.THROTTLE_FREE_ATTEMPTS):
+            with pytest.raises(identity.InvalidCredentials):
+                identity.authenticate(conn, "marta", "incorrecta-larga-123", None, client_ip="203.0.113.50")
+        with pytest.raises(identity.Throttled):  # el atacante queda en espera...
+            identity.authenticate(conn, "marta", PASSWORD, None, client_ip="203.0.113.50")
+        user, _amr = identity.authenticate(conn, "marta", PASSWORD, None, client_ip="198.51.100.7")
+    assert user["username"] == "marta"  # ...pero el titular, desde otra IP, entra
+
+
+def test_throttle_counter_decays_without_failures(client):
+    _create()
+    now = time.time()
+    with main.get_db() as conn:
+        for _ in range(identity.THROTTLE_FREE_ATTEMPTS):
+            with pytest.raises(identity.InvalidCredentials):
+                identity.authenticate(conn, "marta", "incorrecta-larga-123", None, client_ip="9.9.9.9", now=now)
+        later = now + identity.THROTTLE_DECAY_S + 1
+        with pytest.raises(identity.InvalidCredentials):  # ya no hay espera: vuelve a contar desde 1
+            identity.authenticate(conn, "marta", "incorrecta-larga-123", None, client_ip="9.9.9.9", now=later)
+        row = conn.execute("SELECT failures FROM login_throttle").fetchone()
+    assert row["failures"] == 1
+
+
+def test_argon2_runs_outside_the_write_transaction(client, monkeypatch):
+    """Mientras se verifica la contrasena la base debe admitir escrituras (p. ej. la ingesta)."""
+    import sqlite3
+
+    _create()
+    seen = {}
+    real = identity._verify_password
+
+    def spy(stored, password):
+        other = sqlite3.connect(main.DB_PATH, timeout=0.2)
+        try:
+            other.execute("INSERT INTO auth_failures (key, ts) VALUES ('prueba', 0)")
+            other.commit()
+            seen["write_ok"] = True
+        except sqlite3.OperationalError as exc:  # "database is locked"
+            seen["write_ok"] = False
+            seen["error"] = str(exc)
+        finally:
+            other.close()
+        return real(stored, password)
+
+    monkeypatch.setattr(identity, "_verify_password", spy)
+    assert _login(client).status_code == 200
+    assert seen.get("write_ok") is True, seen
+
+
+def test_argon2_concurrency_is_bounded(client, monkeypatch):
+    _create()
+    monkeypatch.setattr(identity, "ARGON2_WAIT_S", 0.05)
+    held = [identity._argon2_slots.acquire() for _ in range(identity.ARGON2_CONCURRENCY)]
+    try:
+        r = _login(client)
+        assert r.status_code == 429 and "retry-after" in r.headers  # sin hueco: no se acumula memoria
+    finally:
+        for _ in held:
+            identity._argon2_slots.release()
+    assert _login(client).status_code == 200
+
+
+def test_auth_scope_is_derived_from_the_route_dependencies(client):
+    from fastapi.routing import APIRoute
+    from starlette.requests import Request
+
+    expected = {
+        ("POST", "/alerts"): "emitter",
+        ("GET", "/alerts"): "analyst",
+        ("GET", "/alerts/00000000-0000-0000-0000-000000000000"): "analyst",
+        ("POST", "/alerts/00000000-0000-0000-0000-000000000000/actions"): "analyst",
+        ("GET", "/network/devices"): "analyst",
+        ("POST", "/auth/login"): "login",
+        ("POST", "/auth/refresh"): "login",
+        ("POST", "/auth/logout"): "analyst",
+        ("GET", "/"): None,
+    }
+    for (method, path), scope in expected.items():
+        request = Request({"type": "http", "method": method, "path": path, "headers": [], "query_string": b"",
+                           "app": main.app, "router": main.app.router})
+        assert main._auth_scope(request) == scope, (method, path)
+    # Ninguna ruta con dependencia de autenticacion puede quedar sin ambito.
+    for route in main.app.routes:
+        if isinstance(route, APIRoute) and {d.call for d in route.dependant.dependencies} & {
+            main.require_api_key, main.require_analyst
+        }:
+            assert route.path in {p for (_m, p) in expected} or "{" in route.path
+
+
+# --- El script real de administracion (no solo la funcion de Python) -------------------------------
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parent.parent / "deploy" / "identity-admin.sh"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None, reason="requiere bash en Linux")
+def test_identity_admin_script_handles_env_file_with_semicolons(tmp_path):
+    """Un ';' en MUV_ANALYSTS no debe ejecutarse como comando ni mostrar claves, y debe hallar el modulo."""
+    keys = dict(
+        line.split("=", 1)
+        for line in subprocess.run(
+            [sys.executable, "-m", "app.identity_cli", "gen-keys"], capture_output=True, text=True,
+            cwd=SCRIPT.parent.parent, check=True,
+        ).stdout.splitlines()
+    )
+    env_file = tmp_path / "fake.env"
+    env_file.write_text(
+        "MUV_API_KEY=CLAVEFALSA0\nMUV_ANALYSTS=ana:respondedor:CLAVEFALSA1;juan:lector:CLAVEFALSA2\n"
+        + "".join(f"{k}={v}\n" for k, v in keys.items()),
+        encoding="utf-8",
+    )
+    env = {
+        "PATH": "/usr/bin:/bin", "MUV_ADMIN_ALLOW_NONROOT": "1", "MUV_ENV_FILE": str(env_file),
+        "MUV_REPO": str(SCRIPT.parent.parent), "MUV_PYTHON": sys.executable, "MUV_DATA_DIR": str(tmp_path),
+    }
+    run = lambda *args, stdin="": subprocess.run(  # noqa: E731
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, input=stdin, timeout=60
+    )
+    created = run("create-user", "rosa", "--role", "respondedor", stdin=f"{PASSWORD}\n{PASSWORD}\n")
+    assert created.returncode == 0, created.stderr
+    assert "Secreto" in created.stdout  # leyo MUV_TOTP_KEY del archivo
+    listed = run("list-users")
+    assert listed.returncode == 0 and "rosa" in listed.stdout
+    for result in (created, listed):
+        assert "CLAVEFALSA" not in result.stdout + result.stderr
+        assert "command not found" not in result.stderr

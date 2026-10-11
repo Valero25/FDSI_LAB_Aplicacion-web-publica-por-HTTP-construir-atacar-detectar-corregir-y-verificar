@@ -12,9 +12,17 @@ Reglas (ventana deslizante, por IP de origen):
   ("deny outgoing") en la ventana. Indica que algo del servidor intenta conectarse a un destino
   no permitido (software mal configurado o, en el peor caso, un proceso comprometido).
 
+- R6 punteria contra una cuenta: >= CUENTA_UMBRAL inicios de sesion fallidos (`login_failed` en
+  actions.log) contra una MISMA cuenta en una ventana larga (por defecto 10 en 3600 s), vengan de
+  una o de muchas IP. Cubre el ataque lento o distribuido que ni el bloqueo por IP ni la espera
+  por (cuenta, IP) frenan. Solo alerta: no bloquea la cuenta (bloquearla permitiria dejar fuera
+  al titular). En la senal, el campo `ip` lleva la cuenta (`login:<usuario>`).
+
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
-                             [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300] [--json]
+                             [--audit-log /var/log/muvautomation/actions.log]
+                             [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300]
+                             [--account-threshold 10] [--account-window 3600] [--json]
 Codigo de salida: 0 sin senales, 10 con al menos una senal (2 queda para errores de uso).
 Requiere `sudo ufw logging medium` para que R4 tenga datos.
 
@@ -58,6 +66,7 @@ UFW_RE = re.compile(
 )
 UFW_BLOCK = 1000  # pseudo-status: los bloqueos de ufw no tienen codigo HTTP
 UFW_OUT_BLOCK = 1001  # bloqueo de un paquete que SALE del servidor
+LOGIN_FAILED = 1002  # inicio de sesion fallido (actions.log)
 
 RULES = {
     "R1-enumeracion-404": {404},
@@ -65,6 +74,7 @@ RULES = {
     "R3-abuso-privilegios-403": {403},
     "R4-escaneo-ufw-block": {UFW_BLOCK},
     "R5-salida-bloqueada-ufw": {UFW_OUT_BLOCK},
+    "R6-punteria-contra-cuenta": {LOGIN_FAILED},
 }
 
 
@@ -124,7 +134,30 @@ def parse_ufw(lines):
             yield m["src"], ts, UFW_BLOCK, f"{m['proto']}/{m['dpt'] or '-'}", None
 
 
-def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int = 5) -> list[dict]:
+def parse_audit(lines):
+    """Devuelve (cuenta, datetime, LOGIN_FAILED, "ip", None) por cada `login_failed` del audit log."""
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            if entry.get("action") != "login_failed":
+                continue
+            actor = str(entry.get("actor") or "")
+            if not actor.startswith("login:"):
+                continue
+            ts = datetime.fromisoformat(entry["timestamp"])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        yield actor[:80], ts, LOGIN_FAILED, str(entry.get("client_ip") or "-")[:64], None
+
+
+def detect(
+    events,
+    threshold: int = 5,
+    window_s: int = 300,
+    ufw_threshold: int = 5,
+    account_threshold: int = 10,
+    account_window_s: int = 3600,
+) -> list[dict]:
     """Aplica las reglas; una senal por (regla, IP) con la ventana de mayor concentracion."""
     by_key: dict[tuple[str, str], list[tuple[datetime, str, object]]] = defaultdict(list)
     for ip, ts, status, req, rid in events:
@@ -137,13 +170,16 @@ def detect(events, threshold: int = 5, window_s: int = 300, ufw_threshold: int =
         hits.sort(key=lambda h: h[0])
         best = (0, 0)  # (cantidad, indice inicial) de la ventana mas densa
         start = 0
+        span = account_window_s if rule.startswith("R6") else window_s
         for end in range(len(hits)):
-            while (hits[end][0] - hits[start][0]).total_seconds() > window_s:
+            while (hits[end][0] - hits[start][0]).total_seconds() > span:
                 start += 1
             if end - start + 1 > best[0]:
                 best = (end - start + 1, start)
         count, first = best
-        limit = ufw_threshold if rule.startswith(("R4", "R5")) else threshold
+        limit = (
+            account_threshold if rule.startswith("R6") else ufw_threshold if rule.startswith(("R4", "R5")) else threshold
+        )
         if count >= limit:
             window = hits[first : first + count]
             signals.append(
@@ -211,6 +247,9 @@ def main(argv=None) -> int:
     ap.add_argument("--ufw-threshold", type=int, default=5)
     ap.add_argument("--state-file", help="JSON con lo ya reportado: la misma senal no se repite en cada ejecucion")
     ap.add_argument("--window", type=int, default=300, help="segundos")
+    ap.add_argument("--audit-log", help="actions.log de la app (activa R6: punteria contra una cuenta)")
+    ap.add_argument("--account-threshold", type=int, default=10)
+    ap.add_argument("--account-window", type=int, default=3600, help="segundos")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -222,10 +261,18 @@ def main(argv=None) -> int:
                 events += list(parse_ufw(fh))
         except OSError as exc:  # sin ufw.log solo se pierde R4; R1-R3 siguen funcionando
             print(f"[AVISO] R4 omitida: no se pudo leer {args.ufw_log}: {exc.strerror}", file=sys.stderr)
+    if args.audit_log:
+        try:
+            with open(args.audit_log, encoding="utf-8", errors="replace") as fh:
+                events += list(parse_audit(fh))
+        except OSError as exc:  # sin audit log solo se pierde R6
+            print(f"[AVISO] R6 omitida: no se pudo leer {args.audit_log}: {exc.strerror}", file=sys.stderr)
     state = load_state(args.state_file) if args.state_file else {}
     if state:
         events = list(drop_reported(events, state))
-    signals = detect(events, args.threshold, args.window, args.ufw_threshold)
+    signals = detect(
+        events, args.threshold, args.window, args.ufw_threshold, args.account_threshold, args.account_window
+    )
     if args.state_file and signals:
         for s in signals:
             # Todo lo visto hasta ahora para (regla, IP) queda como reportado.

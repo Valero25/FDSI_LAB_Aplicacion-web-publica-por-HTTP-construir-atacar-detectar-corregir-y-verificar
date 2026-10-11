@@ -1,5 +1,6 @@
 """Pruebas de la regla de deteccion (scripts/detect.py): umbral, ventana, falsos positivos."""
 import importlib.util
+import json
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -171,3 +172,46 @@ def test_state_file_does_not_repeat_reported_signals(tmp_path):
     assert detect.main(args) == 10
     state.write_text("{no es json", encoding="utf-8")  # estado corrupto: se trata como vacio
     assert detect.main(args) == 10
+
+
+# --- R6: punteria contra una cuenta (audit log) --------------------------------------------------
+
+
+def audit(account, minute, ip="198.51.100.9", action="login_failed", second=0):
+    return json.dumps({
+        "timestamp": f"2026-10-11T12:{minute % 60:02d}:{second:02d}.000000+00:00", "action": action,
+        "method": "POST", "path": "/auth/login", "client_ip": ip, "actor": f"login:{account}",
+        "result": "unauthorized", "request_id": "0" * 32,
+    })
+
+
+def run_audit(lines, **kw):
+    return detect.detect(detect.parse_audit(lines), **kw)
+
+
+def test_slow_distributed_attack_on_one_account_triggers_r6():
+    # Un fallo cada 4 minutos desde IP distintas: por debajo de cualquier umbral por IP.
+    lines = [audit("marta", m * 4, ip=f"203.0.113.{m}") for m in range(12)]
+    sig = run_audit(lines)
+    assert len(sig) == 1 and sig[0]["rule"] == "R6-punteria-contra-cuenta"
+    assert sig[0]["ip"] == "login:marta" and sig[0]["count"] >= 10
+    assert len(set(sig[0]["sample_requests"])) >= 1  # IP de origen como evidencia
+
+
+def test_failures_spread_over_many_accounts_do_not_trigger_r6():
+    lines = [audit(f"usuario{m}", m) for m in range(30)]
+    assert run_audit(lines) == []
+
+
+def test_r6_ignores_other_actions_and_malformed_lines():
+    lines = [audit("marta", m, action="login_ok") for m in range(20)] + ["no es json", "{}", '{"action": 1}']
+    assert run_audit(lines) == []
+
+
+def test_cli_reads_audit_log(tmp_path):
+    access = tmp_path / "access.log"
+    access.write_text(line("10.0.0.5", 0, 200), encoding="utf-8")
+    log = tmp_path / "actions.log"
+    log.write_text("\n".join(audit("marta", m * 2) for m in range(12)), encoding="utf-8")
+    assert detect.main([str(access), "--audit-log", str(log)]) == 10
+    assert detect.main([str(access), "--audit-log", str(tmp_path / "no-existe.log")]) == 0

@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -47,10 +48,21 @@ ROLES = ("lector", "respondedor")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,32}$")
 MIN_PASSWORD_LEN, MAX_PASSWORD_LEN = 12, 128  # el maximo evita usar Argon2 para agotar CPU/memoria
 
-# Espera creciente por cuenta (no bloqueo duro): a partir del 3.er fallo seguido espera 1 s, 2 s,
-# 4 s... con tope. Durante la espera ni siquiera una contrasena correcta se acepta.
+# Espera creciente por (cuenta, IP) (no bloqueo duro): a partir del 3.er fallo seguido espera 1 s,
+# 2 s, 4 s... con tope. Durante la espera ni siquiera una contrasena correcta se acepta, pero solo
+# para esa IP: quien conoce un usuario no puede dejarlo fuera desde otra direccion. La puntería
+# contra una cuenta desde muchas IP la senala la regla R6 de detect.py (no la bloquea).
 THROTTLE_FREE_ATTEMPTS = 3
 THROTTLE_MAX_WAIT_S = 120
+THROTTLE_DECAY_S = 15 * 60  # sin fallos durante este tiempo, el contador vuelve a empezar
+# Sesion: cada renovacion extiende el acceso, pero la sesion entera tiene un limite absoluto y al
+# vencer hay que volver a autenticarse (contrasena y segundo factor).
+MAX_SESSION_S = 12 * 3600
+# Argon2 usa ~64 MiB por verificacion: se acota cuantas corren a la vez (memoria acotada) y no se
+# mantiene la base bloqueada mientras tanto.
+ARGON2_CONCURRENCY = 2
+ARGON2_WAIT_S = 5
+_argon2_slots = threading.BoundedSemaphore(ARGON2_CONCURRENCY)
 THROTTLE_MAX_ROWS = 10_000
 THROTTLE_FORGET_AFTER_S = 24 * 3600
 
@@ -159,7 +171,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
             expires_at REAL NOT NULL,
             used INTEGER NOT NULL DEFAULT 0,
             revoked INTEGER NOT NULL DEFAULT 0,
-            created_at REAL NOT NULL
+            created_at REAL NOT NULL,
+            session_start REAL NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_refresh_family ON refresh_tokens (family_id);
         CREATE TABLE IF NOT EXISTS revoked_jti (
@@ -179,6 +192,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_auth_failures ON auth_failures (key, ts);
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(refresh_tokens)")}
+    if "session_start" not in columns:  # migracion de una base creada antes del limite de sesion
+        conn.execute("ALTER TABLE refresh_tokens ADD COLUMN session_start REAL NOT NULL DEFAULT 0")
 
 
 # --- Contrasenas ----------------------------------------------------------------
@@ -269,6 +285,9 @@ def enroll_totp(conn: sqlite3.Connection, username: str) -> str:
     )
     if cur.rowcount != 1:
         raise ValueError("el usuario no existe")
+    # Si el segundo factor se reinicia porque el dispositivo se comprometio, las sesiones que ya
+    # abrio quien lo tenia deben morir ahora (tambien sus tokens de acceso: la sesion se consulta).
+    revoke_user_sessions(conn, username)
     conn.commit()
     return secret
 
@@ -287,24 +306,24 @@ def list_users(conn: sqlite3.Connection) -> list[dict]:
 # --- Espera creciente por cuenta --------------------------------------------------
 
 
-def _throttle_key(username: str) -> str:
-    return username.lower()[:64]  # existe o no: la espera no revela si la cuenta existe
+def throttle_key(username: str, client_ip: str) -> str:
+    # Por cuenta E IP, exista la cuenta o no: la espera no revela si la cuenta existe y un
+    # atacante solo se bloquea a si mismo, no al titular que entra desde otra direccion.
+    return f"{username.lower()[:64]}|{(client_ip or '?')[:64]}"
 
 
-def _throttle_remaining(conn: sqlite3.Connection, username: str, now: float) -> int:
-    row = conn.execute(
-        "SELECT next_allowed FROM login_throttle WHERE username = ?", (_throttle_key(username),)
-    ).fetchone()
+def _throttle_remaining(conn: sqlite3.Connection, key: str, now: float) -> int:
+    row = conn.execute("SELECT next_allowed FROM login_throttle WHERE username = ?", (key,)).fetchone()
     if row is None or row["next_allowed"] <= now:
         return 0
     return max(1, int(row["next_allowed"] - now + 0.999))
 
 
-def _register_login_failure(conn: sqlite3.Connection, username: str, now: float) -> None:
-    key = _throttle_key(username)
+def _register_login_failure(conn: sqlite3.Connection, key: str, now: float) -> None:
     conn.execute("DELETE FROM login_throttle WHERE updated < ?", (now - THROTTLE_FORGET_AFTER_S,))
-    row = conn.execute("SELECT failures FROM login_throttle WHERE username = ?", (key,)).fetchone()
-    failures = (row["failures"] if row else 0) + 1
+    row = conn.execute("SELECT failures, updated FROM login_throttle WHERE username = ?", (key,)).fetchone()
+    previous = row["failures"] if row and now - row["updated"] <= THROTTLE_DECAY_S else 0
+    failures = previous + 1
     over = failures - THROTTLE_FREE_ATTEMPTS
     wait = 0 if over < 0 else min(2**over, THROTTLE_MAX_WAIT_S)
     if row is None:
@@ -322,8 +341,8 @@ def _register_login_failure(conn: sqlite3.Connection, username: str, now: float)
     )
 
 
-def _clear_login_failures(conn: sqlite3.Connection, username: str) -> None:
-    conn.execute("DELETE FROM login_throttle WHERE username = ?", (_throttle_key(username),))
+def _clear_login_failures(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM login_throttle WHERE username = ?", (key,))
 
 
 # --- Inicio de sesion --------------------------------------------------------------
@@ -355,39 +374,68 @@ def _check_totp(conn: sqlite3.Connection, user: sqlite3.Row, otp: Optional[str],
 
 
 def authenticate(
-    conn: sqlite3.Connection, username: str, password: str, otp: Optional[str], now: Optional[float] = None
+    conn: sqlite3.Connection,
+    username: str,
+    password: str,
+    otp: Optional[str],
+    client_ip: str = "",
+    now: Optional[float] = None,
 ) -> tuple[sqlite3.Row, list[str]]:
     """Devuelve (usuario, amr). Todo fallo es InvalidCredentials; una espera activa es Throttled."""
     now = time.time() if now is None else now
     if not enabled():
         raise NotConfigured("identity not configured")
-    conn.execute("BEGIN IMMEDIATE")
-    remaining = _throttle_remaining(conn, username, now)
+    key = throttle_key(username, client_ip)
+    # Fase 1 (solo lectura): espera vigente y usuario. La base NO esta bloqueada para escritura.
+    remaining = _throttle_remaining(conn, key, now)
     if remaining:
-        conn.rollback()
         raise Throttled(remaining)
     user = conn.execute("SELECT * FROM users WHERE username = ?", (username.lower(),)).fetchone()
-    password_ok = _verify_password(user["password_hash"] if user else None, password)
-    ok = bool(user) and password_ok and not user["disabled"]
-    amr = ["pwd"]
-    if ok:
-        needs_otp = user["role"] == "respondedor" or user["totp_secret_enc"] is not None
-        if needs_otp:
-            ok = _check_totp(conn, user, otp, now)
-            amr.append("otp")
-    if not ok:
-        _register_login_failure(conn, username, now)
+    # Fase 2: Argon2 (caro a proposito), con la concurrencia acotada y fuera de toda transaccion.
+    if not _argon2_slots.acquire(timeout=ARGON2_WAIT_S):
+        raise Throttled(1)
+    try:
+        password_ok = _verify_password(user["password_hash"] if user else None, password)
+    finally:
+        _argon2_slots.release()
+    # Fase 3 (escritura, breve): se revisa la espera de nuevo, el codigo TOTP y se registra el resultado.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        remaining = _throttle_remaining(conn, key, now)
+        if remaining:
+            conn.rollback()
+            raise Throttled(remaining)
+        ok = bool(user) and password_ok and not user["disabled"]
+        amr = ["pwd"]
+        if ok:
+            current = conn.execute(
+                "SELECT * FROM users WHERE username = ?", (user["username"],)
+            ).fetchone()  # estado actual (otro proceso pudo cambiarlo durante Argon2)
+            ok = current is not None and not current["disabled"]
+            if ok and (current["role"] == "respondedor" or current["totp_secret_enc"] is not None):
+                ok = _check_totp(conn, current, otp, now)
+                amr.append("otp")
+            user = current if ok else user
+        if not ok:
+            _register_login_failure(conn, key, now)
+            conn.commit()
+            raise InvalidCredentials()
+        _clear_login_failures(conn, key)
         conn.commit()
-        raise InvalidCredentials()
-    _clear_login_failures(conn, username)
-    conn.commit()
+    except (Throttled, InvalidCredentials):
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     return user, amr
 
 
 # --- Tokens de acceso ---------------------------------------------------------------
 
 
-def issue_access_token(user: sqlite3.Row, amr: list[str], now: Optional[float] = None) -> tuple[str, str, int]:
+def issue_access_token(
+    user: sqlite3.Row, amr: list[str], sid: str, now: Optional[float] = None
+) -> tuple[str, str, int]:
     key = _private_key()
     if key is None:
         raise NotConfigured("identity not configured")
@@ -403,6 +451,7 @@ def issue_access_token(user: sqlite3.Row, amr: list[str], now: Optional[float] =
         "nbf": now,
         "exp": now + ACCESS_TTL_S,
         "jti": jti,
+        "sid": sid,  # sesion (familia de renovacion): cerrarla invalida tambien este token
     }
     return jwt.encode(claims, key, algorithm=ALGORITHM), jti, ACCESS_TTL_S
 
@@ -414,6 +463,7 @@ class Principal:
     amr: tuple
     jti: str
     exp: int
+    sid: str
 
 
 def verify_access_token(conn: sqlite3.Connection, token: str) -> Principal:
@@ -430,14 +480,21 @@ def verify_access_token(conn: sqlite3.Connection, token: str) -> Principal:
             audience=AUDIENCE,
             issuer=ISSUER,
             leeway=CLOCK_LEEWAY_S,
-            options={"require": ["exp", "iat", "iss", "aud", "sub", "jti"]},
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "jti", "sid"]},
         )
     except jwt.PyJWTError as exc:
         raise TokenInvalid("invalid token") from exc
-    if not all(isinstance(claims[k], str) and claims[k] for k in ("sub", "jti")):
+    if not all(isinstance(claims[k], str) and claims[k] for k in ("sub", "jti", "sid")):
         raise TokenInvalid("malformed claims")
     if conn.execute("SELECT 1 FROM revoked_jti WHERE jti = ?", (claims["jti"],)).fetchone():
         raise TokenInvalid("revoked")
+    # La sesion debe seguir viva: logout, cambio de contrasena, reinicio del TOTP, baja del
+    # usuario o reutilizacion de un token de renovacion la cierran y el token de acceso muere ya.
+    session = conn.execute(
+        "SELECT 1 FROM refresh_tokens WHERE family_id = ? AND revoked = 0 LIMIT 1", (claims["sid"],)
+    ).fetchone()
+    if session is None:
+        raise TokenInvalid("session ended")
     # El rol y el estado salen de la base, no del token: deshabilitar a un usuario surte efecto ya.
     user = conn.execute(
         "SELECT username, role, disabled FROM users WHERE username = ?", (str(claims["sub"]),)
@@ -447,7 +504,7 @@ def verify_access_token(conn: sqlite3.Connection, token: str) -> Principal:
     amr = tuple(claims.get("amr") or ())
     if user["role"] == "respondedor" and "otp" not in amr:
         raise TokenInvalid("second factor required")
-    return Principal(user["username"], user["role"], amr, claims["jti"], int(claims["exp"]))
+    return Principal(user["username"], user["role"], amr, claims["jti"], int(claims["exp"]), claims["sid"])
 
 
 def revoke_access_token(conn: sqlite3.Connection, jti: str, exp: float, now: Optional[float] = None) -> None:
@@ -464,24 +521,38 @@ def _hash_token(raw: str) -> str:
 
 
 def issue_refresh_token(
-    conn: sqlite3.Connection, username: str, amr: list[str], family_id: Optional[str] = None,
+    conn: sqlite3.Connection,
+    username: str,
+    amr: list[str],
+    family_id: Optional[str] = None,
+    session_start: Optional[float] = None,
     now: Optional[float] = None,
-) -> str:
+) -> tuple[str, str]:
+    """Devuelve (token en claro, id de sesion). El id de sesion es la familia de renovacion."""
     now = time.time() if now is None else now
     raw = secrets.token_urlsafe(48)
+    family = family_id or uuid.uuid4().hex
     conn.execute("DELETE FROM refresh_tokens WHERE expires_at < ?", (now - 86400,))
     conn.execute(
-        "INSERT INTO refresh_tokens (token_hash, family_id, username, amr, expires_at, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (_hash_token(raw), family_id or uuid.uuid4().hex, username, ",".join(amr), now + REFRESH_TTL_S, now),
+        "INSERT INTO refresh_tokens (token_hash, family_id, username, amr, expires_at, created_at, session_start) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            _hash_token(raw),
+            family,
+            username,
+            ",".join(amr),
+            now + REFRESH_TTL_S,
+            now,
+            now if session_start is None else session_start,
+        ),
     )
-    return raw
+    return raw, family
 
 
 def rotate_refresh_token(
     conn: sqlite3.Connection, raw: str, now: Optional[float] = None
-) -> tuple[sqlite3.Row, list[str], str]:
-    """Consume el token y emite el siguiente de la misma familia. Devuelve (usuario, amr, nuevo)."""
+) -> tuple[sqlite3.Row, list[str], str, str]:
+    """Consume el token y emite el siguiente de la misma sesion. Devuelve (usuario, amr, nuevo, sid)."""
     now = time.time() if now is None else now
     if not (16 <= len(raw) <= 256):
         raise TokenInvalid("malformed")
@@ -498,18 +569,27 @@ def rotate_refresh_token(
     if row["expires_at"] < now:
         conn.rollback()
         raise TokenInvalid("expired")
-    user = conn.execute(
-        "SELECT * FROM users WHERE username = ?", (row["username"],)
-    ).fetchone()
+    if row["session_start"] and now - row["session_start"] > MAX_SESSION_S:
+        # Limite absoluto de la sesion: hay que volver a autenticarse (contrasena y segundo factor).
+        conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (row["family_id"],))
+        conn.commit()
+        raise TokenInvalid("session too old")
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (row["username"],)).fetchone()
     if user is None or user["disabled"]:
         conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (row["family_id"],))
         conn.commit()
         raise TokenInvalid("unknown or disabled user")
     conn.execute("UPDATE refresh_tokens SET used = 1 WHERE token_hash = ?", (row["token_hash"],))
     amr = row["amr"].split(",")
-    new_raw = issue_refresh_token(conn, row["username"], amr, family_id=row["family_id"], now=now)
+    new_raw, family = issue_refresh_token(
+        conn, row["username"], amr, family_id=row["family_id"], session_start=row["session_start"], now=now
+    )
     conn.commit()
-    return user, amr, new_raw
+    return user, amr, new_raw, family
+
+
+def revoke_session(conn: sqlite3.Connection, sid: str) -> None:
+    conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (sid,))
 
 
 def revoke_family_of(conn: sqlite3.Connection, raw: str) -> None:
