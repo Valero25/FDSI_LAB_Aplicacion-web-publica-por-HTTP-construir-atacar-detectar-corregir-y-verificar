@@ -618,3 +618,38 @@ def test_identity_admin_script_handles_env_file_with_semicolons(tmp_path):
     for result in (created, listed):
         assert "CLAVEFALSA" not in result.stdout + result.stderr
         assert "command not found" not in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None, reason="requiere bash en Linux")
+def test_identity_admin_static_keys_switch_and_key_guards(tmp_path):
+    env_file = tmp_path / "old.env"  # creado ANTES de que existiera MUV_ALLOW_ANALYST_STATIC_KEYS
+    env_file.write_text("MUV_API_KEY=CLAVEFALSA0\nMUV_ANALYSTS=ana:respondedor:CLAVEFALSA1;juan:lector:CLAVEFALSA2\n")
+    env = {
+        "PATH": "/usr/bin:/bin", "MUV_ADMIN_ALLOW_NONROOT": "1", "MUV_ENV_FILE": str(env_file),
+        "MUV_REPO": str(SCRIPT.parent.parent), "MUV_PYTHON": sys.executable, "MUV_DATA_DIR": str(tmp_path),
+    }
+    run = lambda *args, stdin="": subprocess.run(  # noqa: E731
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, input=stdin, timeout=60
+    )
+    count = lambda: env_file.read_text().count("MUV_ALLOW_ANALYST_STATIC_KEYS=")  # noqa: E731
+
+    # A. el interruptor agrega la linea si no existe, y despues la reemplaza (siempre una sola)
+    assert count() == 0
+    assert run("static-keys", "off").returncode == 0 and count() == 1
+    assert "MUV_ALLOW_ANALYST_STATIC_KEYS=no" in env_file.read_text()
+    assert run("static-keys", "on").returncode == 0 and count() == 1
+    assert "MUV_ALLOW_ANALYST_STATIC_KEYS=yes" in env_file.read_text()
+    assert "CLAVEFALSA2" in env_file.read_text()  # el resto del archivo queda intacto
+    assert run("static-keys", "quizas").returncode == 2
+
+    # B. gen-keys en un archivo sin claves funciona; con claves ya presentes se niega y no imprime nada
+    first = run("gen-keys")
+    assert first.returncode == 0 and "MUV_TOTP_KEY=" in first.stdout
+    env_file.write_text(env_file.read_text() + first.stdout)
+    second = run("gen-keys")
+    assert second.returncode == 1 and second.stdout == "" and "ya tiene" in second.stderr
+
+    # B. con una variable repetida vale la ULTIMA aparicion (como systemd)
+    env_file.write_text("MUV_TOTP_KEY=basura-no-valida\n" + env_file.read_text())  # la primera es invalida
+    created = run("create-user", "rosa", "--role", "respondedor", stdin=f"{PASSWORD}\n{PASSWORD}\n")
+    assert created.returncode == 0 and "Secreto" in created.stdout, created.stderr

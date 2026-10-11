@@ -67,10 +67,18 @@ sudo bash deploy/identity-admin.sh create-user marta --role lector
 sudo bash deploy/identity-admin.sh create-user rosa  --role respondedor
 sudo bash deploy/identity-admin.sh list-users
 
-# 3. Verificado el acceso con tokens, apagar las claves estáticas de analista
-sudo sed -i 's/^MUV_ALLOW_ANALYST_STATIC_KEYS=.*/MUV_ALLOW_ANALYST_STATIC_KEYS=no/' /etc/muvautomation.env
+# 3. Verificado el acceso con tokens, apagar las claves estáticas de analista.
+#    Agrega la línea si no existe (un archivo creado antes de esta variable no la tiene) o la reemplaza.
+sudo bash deploy/identity-admin.sh static-keys off
 sudo systemctl restart muvautomation-api
+sudo grep -c '^MUV_ALLOW_ANALYST_STATIC_KEYS=' /etc/muvautomation.env   # debe decir 1
+# Comprobación: con una clave estática antigua ya debe responder 401
+curl -sk -o /dev/null -w "%{http_code}\n" -H "X-Analyst-Key: <clave-antigua>" https://192.168.61.129/alerts
 ```
+
+`gen-keys` se niega a ejecutarse si el archivo ya tiene `MUV_JWT_PRIVATE_KEY` o `MUV_TOTP_KEY`:
+generar otras dejaría a los usuarios enrolados con una clave de TOTP y al servicio descifrando con otra.
+Si una variable aparece repetida, el script lee la **última** (igual que systemd).
 
 Reseteo: `set-password` y `enroll-totp` (secreto nuevo) cierran las sesiones abiertas; `disable-user`
 cierra todo. No hay recuperación autónoma: el administrador del host es quien la hace.
