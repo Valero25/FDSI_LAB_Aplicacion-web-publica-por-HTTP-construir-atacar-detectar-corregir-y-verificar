@@ -3,6 +3,9 @@
 [sshd]
 enabled   = true
 backend   = systemd
+# Veto en ufw con DENY (descarte silencioso), como el jail muvautomation: REJECT confirma al atacante
+# que hay un firewall. "to any": el veto cubre todos los puertos, no solo el 22.
+banaction = ufw[blocktype=deny]
 maxretry  = 3
 findtime  = 10m
 bantime   = 1h
