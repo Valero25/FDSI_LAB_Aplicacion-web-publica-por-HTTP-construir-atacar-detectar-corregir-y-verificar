@@ -1,0 +1,102 @@
+# Pipeline DevSecOps: cada cambio pasa por pruebas, analisis estatico, auditoria de dependencias,
+# busqueda de secretos y revision de los scripts de despliegue antes de llegar a main.
+# Las acciones de terceros conviene fijarlas por SHA de commit (no por etiqueta) antes de la entrega.
+name: DevSecOps
+
+on:
+  push:
+    branches: [main, vm-test, adelanto-lab]
+  pull_request:
+    branches: [main]
+
+# Minimo privilegio: el pipeline solo lee el repositorio.
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pruebas:
+    name: Pruebas automatizadas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: pytest
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          export MUV_DATA_DIR="$(mktemp -d)" MUV_LOG_DIR="$(mktemp -d)"
+          python -m pytest -q -p no:cacheprovider
+
+  sast:
+    name: Analisis estatico (Bandit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit
+      # Informe completo en el log (no bloquea) y, aparte, la puerta: severidad alta falla el pipeline.
+      - name: Informe completo
+        run: bandit -r app scripts || true
+      - name: Puerta de severidad alta
+        run: bandit -r app scripts --severity-level high
+
+  dependencias:
+    name: Auditoria de dependencias (pip-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - name: Vulnerabilidades conocidas en dependencias de produccion
+        run: pip-audit -r app/requirements.txt --strict
+
+  secretos:
+    name: Busqueda de secretos (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # todo el historial: un secreto borrado sigue en los commits anteriores
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  despliegue:
+    name: Scripts y configuracion de despliegue
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Sintaxis de los scripts
+        run: |
+          for f in deploy/*.sh; do bash -n "$f"; done
+      - name: ShellCheck (errores)
+        run: shellcheck --severity=error deploy/*.sh
+      - name: Sin finales de linea de Windows en lo que corre en el servidor
+        run: |
+          ! grep -rIl $'\r' deploy nginx scripts

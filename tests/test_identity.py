@@ -608,7 +608,9 @@ def test_identity_admin_script_handles_env_file_with_semicolons(tmp_path):
         "MUV_REPO": str(SCRIPT.parent.parent), "MUV_PYTHON": sys.executable, "MUV_DATA_DIR": str(tmp_path),
     }
     run = lambda *args, stdin="": subprocess.run(  # noqa: E731
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, input=stdin, timeout=60
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, input=stdin, timeout=60,
+        # Sin terminal de control: getpass abre /dev/tty si existe e ignoraria el stdin de la prueba.
+        start_new_session=True,
     )
     created = run("create-user", "rosa", "--role", "respondedor", stdin=f"{PASSWORD}\n{PASSWORD}\n")
     assert created.returncode == 0, created.stderr
@@ -629,7 +631,9 @@ def test_identity_admin_static_keys_switch_and_key_guards(tmp_path):
         "MUV_REPO": str(SCRIPT.parent.parent), "MUV_PYTHON": sys.executable, "MUV_DATA_DIR": str(tmp_path),
     }
     run = lambda *args, stdin="": subprocess.run(  # noqa: E731
-        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, input=stdin, timeout=60
+        ["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env, input=stdin, timeout=60,
+        # Sin terminal de control: getpass abre /dev/tty si existe e ignoraria el stdin de la prueba.
+        start_new_session=True,
     )
     count = lambda: env_file.read_text().count("MUV_ALLOW_ANALYST_STATIC_KEYS=")  # noqa: E731
 
