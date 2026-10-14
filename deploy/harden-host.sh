@@ -4,6 +4,10 @@
 # (sudo suele eliminar SSH_CLIENT: se pasa a mano; si llega vacio se intenta obtener con `who -m`.)
 # Orden seguro (leccion del incidente de ufw): primero se crean los allow, luego se cierra el resto.
 set -euo pipefail
+# Nada de este script debe leer de la terminal: ejecutado como "sudo ... | tee", un comando que la abre
+# (apt/debconf, needrestart, un paginador) queda DETENIDO (estado T) esperando una respuesta invisible.
+exec </dev/null
+export SYSTEMD_PAGER=""
 
 : "${LAB_CIDR:?Defina LAB_CIDR, p. ej. 192.168.61.0/24}"
 : "${ADMIN_USER:?Defina ADMIN_USER (usuario que administra por SSH)}"
@@ -226,9 +230,15 @@ if systemctl cat nginx >/dev/null 2>&1; then
       dpkg -s "$p" >/dev/null 2>&1 || WAF_PKGS="$WAF_PKGS $p"
     done
     if [ -n "$WAF_PKGS" ]; then
+      echo "   instalando paquetes del WAF (puede tardar):$WAF_PKGS"
       # --no-install-recommends: modsecurity-crs no debe arrastrar el modulo de Apache (ni Apache).
+      # Sin terminal (D-7): debconf no pregunta, dpkg conserva los archivos de configuracion locales,
+      # needrestart reinicia servicios sin preguntar y apt-listchanges no abre un paginador.
       # shellcheck disable=SC2086 # lista de paquetes separada por espacios a proposito
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $WAF_PKGS >/dev/null \
+      DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none \
+        apt-get install -y -q --no-install-recommends \
+          -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+          $WAF_PKGS </dev/null >/dev/null \
         || echo "   AVISO: no se pudieron instalar:$WAF_PKGS"
     fi
     # Audit log: solo root y el grupo adm (el de los logs de Nginx; detect.py lo lee con ese grupo).
