@@ -1,6 +1,7 @@
 """Pruebas de la regla de deteccion (scripts/detect.py): umbral, ventana, falsos positivos."""
 import importlib.util
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -9,9 +10,22 @@ spec = importlib.util.spec_from_file_location(
 detect = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(detect)
 
+# Marcas de tiempo relativas a la hora actual: con fechas fijas, save_state (7 dias) acababa descartando
+# el estado y los tests caducaban. Base = inicio de la hora de hace 2 h, asi minute/second (0-59) siguen
+# siendo desplazamientos dentro de una misma hora y ningun evento queda en el futuro.
+BASE = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+
+
+def at(minute=0, second=0):
+    return BASE + timedelta(minutes=minute, seconds=second)
+
+
+def iso(minute=0, second=0, micro=True):
+    return at(minute, second).isoformat(timespec="microseconds" if micro else "seconds")
+
 
 def line(ip, second, status, path="/x", minute=0):
-    ts = f"05/Oct/2026:10:{minute:02d}:{second:02d} +0000"
+    ts = at(minute, second).strftime("%d/%b/%Y:%H:%M:%S +0000")
     return f'{ip} - - [{ts}] "GET {path} HTTP/1.1" {status} 153 "-" "curl/8.5"'
 
 
@@ -79,7 +93,7 @@ def test_few_403_do_not_trigger():
 
 def ufw(src, second, dpt, dst="192.168.61.129", proto="TCP", minute=0):
     return (
-        f"2026-10-11T12:{minute:02d}:{second:02d}.000000+00:00 lab3-server kernel: [ 100.1] "
+        f"{iso(minute, second)} lab3-server kernel: [ 100.1] "
         f"[UFW BLOCK] IN=ens33 OUT= MAC=00:0c:29:aa:bb:cc SRC={src} DST={dst} LEN=44 TOS=0x00 "
         f"PREC=0x00 TTL=40 ID=1 PROTO={proto} SPT=40000 DPT={dpt} WINDOW=1024 RES=0x00 SYN URGP=0"
     )
@@ -108,7 +122,7 @@ def test_multicast_and_broadcast_noise_is_ignored():
 
 def test_ufw_syslog_classic_timestamp_is_parsed():
     classic = [
-        f"Oct 11 12:00:{s:02d} lab3-server kernel: [1.0] [UFW BLOCK] IN=ens33 OUT= SRC=10.9.9.9 "
+        f"{at(0, s).strftime('%b %d %H:%M:%S')} lab3-server kernel: [1.0] [UFW BLOCK] IN=ens33 OUT= SRC=10.9.9.9 "
         f"DST=192.168.61.129 PROTO=TCP SPT=1 DPT={3000 + s}"
         for s in range(10)
     ]
@@ -116,7 +130,7 @@ def test_ufw_syslog_classic_timestamp_is_parsed():
 
 
 def test_ufw_lines_with_forged_fields_are_skipped():
-    forged = ["2026-10-11T12:00:00+00:00 h kernel: [UFW BLOCK] SRC=no-es-ip DST=1.2.3.4 PROTO=TCP DPT=1"] * 20
+    forged = [f"{iso(micro=False)} h kernel: [UFW BLOCK] SRC=no-es-ip DST=1.2.3.4 PROTO=TCP DPT=1"] * 20
     assert run_ufw(forged) == []
 
 
@@ -179,7 +193,7 @@ def test_state_file_does_not_repeat_reported_signals(tmp_path):
 
 def audit(account, minute, ip="198.51.100.9", action="login_failed", second=0):
     return json.dumps({
-        "timestamp": f"2026-10-11T12:{minute % 60:02d}:{second:02d}.000000+00:00", "action": action,
+        "timestamp": iso(minute % 60, second), "action": action,
         "method": "POST", "path": "/auth/login", "client_ip": ip, "actor": f"login:{account}",
         "result": "unauthorized", "request_id": "0" * 32,
     })
