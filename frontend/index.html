@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>MuvAutomation · Consola del analista (LAB)</title>
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>MuvAutomation · Consola del analista <span class="tag">LAB</span></h1>
+    <div id="session-bar" class="session" hidden>
+      <span id="session-user"></span>
+      <nav class="tabs" aria-label="Secciones">
+        <button type="button" id="nav-alerts" class="tab">Alertas</button>
+        <button type="button" id="nav-devices" class="tab">Inventario de red</button>
+      </nav>
+      <button type="button" id="logout-button" class="secondary">Cerrar sesión</button>
+    </div>
+  </header>
+
+  <p id="notice" class="notice" role="status" hidden></p>
+
+  <main>
+    <!-- Inicio de sesion. method="post": si el script no cargara, el navegador nunca pondria la
+         contrasena en la URL (un GET la dejaria en el historial y en access.log). -->
+    <section id="login-view" class="card narrow" aria-labelledby="login-title">
+      <h2 id="login-title">Iniciar sesión</h2>
+      <form id="login-form" method="post" autocomplete="on">
+        <label for="login-username">Usuario</label>
+        <input id="login-username" name="username" type="text" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required minlength="3" maxlength="32"
+               pattern="[A-Za-z0-9._\-]{3,32}">
+        <label for="login-password">Contraseña</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password"
+               required maxlength="128">
+        <label for="login-otp">Código TOTP <span class="hint">(6 dígitos; obligatorio para respondedores)</span></label>
+        <input id="login-otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="6" pattern="[0-9]{6}">
+        <button type="submit" id="login-submit">Entrar</button>
+        <p id="login-error" class="error" role="alert" hidden></p>
+      </form>
+      <p class="hint">La sesión se guarda solo en la memoria de esta pestaña: al recargar la página hay que iniciar sesión de nuevo.</p>
+    </section>
+
+    <!-- Alertas -->
+    <section id="alerts-view" hidden aria-labelledby="alerts-title">
+      <h2 id="alerts-title">Alertas</h2>
+      <form id="alerts-filter" class="filters">
+        <label for="filter-severity">Severidad</label>
+        <select id="filter-severity" name="severity">
+          <option value="">Todas</option>
+          <option value="critical">Crítica</option>
+          <option value="high">Alta</option>
+          <option value="medium">Media</option>
+          <option value="low">Baja</option>
+        </select>
+        <label for="filter-status">Estado</label>
+        <select id="filter-status" name="status">
+          <option value="">Todos</option>
+          <option value="new">Nueva</option>
+          <option value="classified">Clasificada</option>
+          <option value="escalated">Escalada</option>
+          <option value="acknowledged">Reconocida</option>
+          <option value="closed">Cerrada</option>
+        </select>
+        <button type="submit">Actualizar</button>
+      </form>
+      <p id="alerts-error" class="error" role="alert" hidden></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Creada</th><th scope="col">Severidad</th><th scope="col">Estado</th>
+              <th scope="col">Riesgo</th><th scope="col">Host</th><th scope="col">Técnica</th>
+              <th scope="col"><span class="visually-hidden">Abrir</span></th>
+            </tr>
+          </thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+      </div>
+
+      <article id="alert-detail" class="card" hidden aria-labelledby="alert-detail-title">
+        <h3 id="alert-detail-title">Detalle de la alerta</h3>
+        <dl id="alert-fields" class="fields"></dl>
+        <h4>Enriquecimiento</h4>
+        <dl id="alert-enrichment" class="fields"></dl>
+        <h4>Acciones registradas</h4>
+        <ul id="alert-actions" class="history"></ul>
+        <form id="action-form" class="action-form">
+          <h4>Registrar acción</h4>
+          <label for="action-name">Acción</label>
+          <select id="action-name" name="action" required></select>
+          <label for="action-note">Nota <span class="hint">(opcional, máx. 500 caracteres)</span></label>
+          <textarea id="action-note" name="note" maxlength="500" rows="3"></textarea>
+          <button type="submit">Registrar</button>
+          <p id="action-result" class="error" role="alert" hidden></p>
+        </form>
+      </article>
+    </section>
+
+    <!-- Inventario de red -->
+    <section id="devices-view" hidden aria-labelledby="devices-title">
+      <h2 id="devices-title">Inventario de red</h2>
+      <form id="devices-filter" class="filters">
+        <label for="filter-type">Tipo</label>
+        <select id="filter-type" name="type">
+          <option value="">Todos</option>
+          <option value="firewall">Firewall</option>
+          <option value="router">Router</option>
+          <option value="switch">Switch</option>
+        </select>
+        <button type="submit">Actualizar</button>
+      </form>
+      <p id="devices-error" class="error" role="alert" hidden></p>
+      <div class="table-wrap">
+        <table>
+          <thead id="devices-head"></thead>
+          <tbody id="devices-body"></tbody>
+        </table>
+      </div>
+      <article id="device-detail" class="card" hidden aria-labelledby="device-detail-title">
+        <h3 id="device-detail-title">Detalle del dispositivo</h3>
+        <dl id="device-fields" class="fields"></dl>
+      </article>
+    </section>
+  </main>
+</body>
+</html>
