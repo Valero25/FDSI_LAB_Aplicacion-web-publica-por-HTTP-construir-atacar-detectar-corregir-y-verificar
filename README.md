@@ -42,7 +42,7 @@ El laboratorio se hizo en dos partes. La idea es **comparar** la versión inicia
 | Permisos y repositorio | `.git`/`.venv` en `rwxrwxr-x`; repositorio público | Sin acceso para "otros", DB y logs en 640, `/.git` bloqueado y repositorio privado | G12 |
 | Clasificación y escalamiento | Solo en el diseño; toda alerta queda en `new` | **Motor de Clasificación**: MITRE ATT&CK local + AbuseIPDB → `risk_score` 0–100. **Motor de Escalamiento**: escala solo si el score es ≥ 70 | G13 |
 | Integraciones externas | Ninguna | Solo AbuseIPDB, con controles (IPs públicas, timeout, validación, caché, cuota, segundo plano) | G14 |
-| Salida a Internet | `allow outgoing` | `deny outgoing` salvo 53, 123/udp, 80 y 443 | G15 |
+| Salida a Internet | `allow outgoing` | `deny outgoing` salvo 53, 123/udp, 80, 443 y 4460/tcp (NTS) solo hacia los rangos de Canonical | G15 |
 | Analistas | Anónimos: `GET /alerts` abierto y sin registro de quién actúa | Clave por analista con rol `lector` / `respondedor`; acciones con 401 / 403 / 409 y registro del `actor` | G16 |
 | Límites de confianza (DFD) | **Uno** ("Backend del prototipo") | **Cuatro zonas** (red de laboratorio, borde Nginx/TLS, aplicación en loopback y datos en disco), más Internet como tercero no confiable | — |
 
@@ -154,6 +154,7 @@ curl -i http://127.0.0.1:8000/alerts                                # 401
 
 - Parte 1 (HTTP): [INFORME.md, Anexo](INFORME.md#anexo--procedimiento-de-despliegue-en-ubuntu-paso-a-paso).
 - Parte 2 (HTTPS + hardening): [INFORME_PARTE2.md §8](INFORME_PARTE2.md#8-cambios-implementados). Explica, en un orden seguro, cómo generar el certificado, configurar los secretos, systemd, Nginx, `ufw` (entrada y salida), SSH y los permisos.
+- **Dependencia de la hora (NTS):** el filtrado de salida permite TCP 4460 solo hacia `185.125.190.0/24` y `91.189.91.0/24` (servidores NTS de Canonical que usa `chrony`). De la hora dependen la caducidad de los JWT y de los tokens de renovación y la ventana de TOTP. Si Canonical cambia esos rangos, la regla R5 de `detect.py` mostrará los bloqueos salientes hacia el puerto 4460 y `sudo chronyc -N authdata` mostrará el fallo del intercambio de claves; en ese caso hay que actualizar las dos reglas de `deploy/harden-host.sh`.
 
 ## URL publicada
 

@@ -89,6 +89,12 @@ if [ "${EGRESS_FILTER:-yes}" = "yes" ]; then
   ufw allow out 80/tcp
   ufw allow out 443/tcp
   ufw allow out 67/udp
+  # chrony usa NTS: primero intercambia claves por TCP 4460 con los servidores de Canonical y luego
+  # consulta por 123/udp. Sin esto el reloj no sincroniza, y de la hora dependen la caducidad de los
+  # JWT y de los tokens de renovacion y la ventana de TOTP. Solo esos rangos (no 4460 a todo internet);
+  # si Canonical los cambia, R5 vera los bloqueos y "chronyc -N authdata" mostrara el fallo.
+  ufw allow out to 185.125.190.0/24 port 4460 proto tcp comment 'NTS Ubuntu'
+  ufw allow out to 91.189.91.0/24 port 4460 proto tcp comment 'NTS Ubuntu'
   ufw default deny outgoing
 fi
 # Registra los bloqueos en /var/log/ufw.log: es la unica fuente de un escaneo SYN (regla R4 de detect.py).
@@ -175,4 +181,8 @@ systemctl enable muvautomation-api muvautomation-detect.timer
 systemctl restart muvautomation-api
 systemctl restart muvautomation-detect.timer
 systemd-analyze security muvautomation-api --no-pager | tail -3
+# Solo aviso: tras abrir NTS la primera sincronizacion tarda unos segundos.
+if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" != "yes" ]; then
+  echo "AVISO: el reloj aun no esta sincronizado (JWT, renovacion y TOTP dependen de la hora). Revise en un minuto: timedatectl; sudo chronyc -N authdata"
+fi
 echo "Listo. Verifique: systemctl status muvautomation-api; sudo ufw status verbose; sudo sshd -T | grep -Ei 'passwordauth|permitroot'; systemctl list-timers muvautomation-detect.timer; sudo fail2ban-client status; sudo auditctl -l | head"
