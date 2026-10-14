@@ -102,8 +102,12 @@ scripts/
 └── build_mitre_index.py           # regenera el índice MITRE desde el bundle STIX oficial
 tests/
 └── test_api.py                    # pruebas de los controles y de los motores
+frontend/                          # consola del analista (etapa G): HTML + CSS + JS sin dependencias
+├── index.html
+├── app.js / api.js / dom.js       # vistas · sesión y fetch (tokens en memoria) · DOM solo con textContent
+└── app.css
 nginx/
-├── muvautomation.conf             # :80 -> 301, :443 TLS + hardening -> 127.0.0.1:8000
+├── muvautomation.conf             # :80 -> 301, :443 TLS + hardening; /app/ estático, / -> API (127.0.0.1:8000)
 └── modsecurity/                   # WAF ModSecurity v3 + OWASP CRS (etapa F, solo detección)
 deploy/
 ├── muvautomation-api.service      # unidad systemd con sandboxing
@@ -182,6 +186,14 @@ EOF
 journalctl -u muvautomation-detect --since today --no-pager | grep R7     # señales R7
 sudo grep 'rid=<unique_id>' /var/log/nginx/access.log                      # la misma petición en Nginx
 ```
+
+## Consola del analista (etapa G)
+
+**Cómo entrar:** abrir `https://192.168.61.129/app/` (o `https://192.168.61.129/`, que redirige ahí) desde la red del laboratorio, aceptar el certificado autofirmado e iniciar sesión con un usuario creado en el servidor con `deploy/identity-admin.sh` (ver [IDENTIDAD.md](IDENTIDAD.md)). El código TOTP es obligatorio para `respondedor`. No hay registro ni usuario por defecto.
+
+- **Qué hace:** lista y detalle de alertas (`GET /alerts`, `GET /alerts/{id}`), registro de acciones (`POST /alerts/{id}/actions`; solo ofrece las del rol, pero quien autoriza es el servidor), inventario de red (`GET /network/devices`; `mgmt_ip` solo si el servidor la envía) y renovación automática del token (`POST /auth/refresh`) un minuto antes de que caduque. Si la renovación falla (token reutilizado, sesión de 12 h vencida, usuario deshabilitado), vuelve al login sin reintentar.
+- **Decisión aceptada: la sesión vive solo en la memoria de la pestaña.** Los tokens están en variables del módulo `api.js`: nada en `localStorage`, `sessionStorage`, cookies ni en la URL. Recargar la página o abrir otra pestaña obliga a iniciar sesión de nuevo.
+- **Seguridad:** todo el contenido de la API se pinta con `textContent` (una descripción `<img src=x onerror=alert(1)>` se ve como texto); sin JS ni CSS en línea; CSP propia de `/app/` (`script-src 'self'`, `connect-src 'self'`, `require-trusted-types-for 'script'`); peticiones solo al mismo origen, con `credentials: 'omit'` y `Content-Type: application/json`. Nginx sirve `/app/` sin pasar por el WAF ni por el límite de la API (`muv_api`), con su propio límite (`muv_static`). `tests/test_frontend.py` y `tests/test_nginx_frontend.py` comprueban estas reglas.
 
 ## URL publicada
 
