@@ -10,10 +10,11 @@ Description=MuvAutomation - deteccion de enumeracion, fuerza bruta y abuso de pr
 Type=oneshot
 User=muvapi
 Group=muvapi
-# /var/log/nginx/access.log es root:adm 0640 en Ubuntu.
+# /var/log/nginx/access.log es root:adm 0640 en Ubuntu; /var/log/modsecurity (audit log del WAF, R7)
+# es root:adm 0750.
 SupplementaryGroups=adm
 WorkingDirectory=/opt/fdsi-lab3
-ExecStart=/opt/fdsi-lab3/.venv/bin/python -I scripts/detect.py /var/log/nginx/access.log --ufw-log /var/log/ufw.log --audit-log /var/log/muvautomation/actions.log --state-file /var/lib/muvautomation-detect/state.json
+ExecStart=/opt/fdsi-lab3/.venv/bin/python -I scripts/detect.py /var/log/nginx/access.log --ufw-log /var/log/ufw.log --audit-log /var/log/muvautomation/actions.log --waf-log /var/log/modsecurity/audit.json --state-file /var/lib/muvautomation-detect/state.json
 SuccessExitStatus=10
 StateDirectory=muvautomation-detect
 StateDirectoryMode=0750

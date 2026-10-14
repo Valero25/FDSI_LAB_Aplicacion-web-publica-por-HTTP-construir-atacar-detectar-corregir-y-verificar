@@ -229,3 +229,75 @@ def test_cli_reads_audit_log(tmp_path):
     log.write_text("\n".join(audit("marta", m * 2) for m in range(12)), encoding="utf-8")
     assert detect.main([str(access), "--audit-log", str(log)]) == 10
     assert detect.main([str(access), "--audit-log", str(tmp_path / "no-existe.log")]) == 0
+
+
+# --- R7: eventos del WAF (audit log JSON de ModSecurity) ------------------------------------------
+
+
+def waf(ip, minute, second=0, ids=("942100", "949110"), uri="/alerts", rid="ab" * 16, secret="S3cr3t-Pass!"):
+    """Transaccion como la escribe libmodsecurity (SecAuditLogFormat JSON, partes A, H y Z)."""
+    messages = [
+        {"message": "SQL Injection Attack Detected via libinjection",
+         "details": {"match": f"Matched Data: {secret} found within ARGS:json.password: {secret}",
+                     "data": f"Matched Data: {secret}", "ruleId": rule_id, "severity": "2"}}
+        for rule_id in ids
+    ]
+    return json.dumps({"transaction": {
+        "client_ip": ip, "client_port": 50000, "host_ip": "192.168.61.129", "host_port": 443,
+        # Hora local del servidor y sin zona, como en libmodsecurity.
+        "time_stamp": at(minute, second).astimezone().strftime("%a %b %d %H:%M:%S %Y"),
+        "unique_id": rid, "request": {"method": "POST", "http_version": 2.0, "uri": uri},
+        "response": {"http_code": 200}, "messages": messages,
+    }})
+
+
+def run_waf(lines, **kw):
+    return detect.detect(detect.parse_waf(lines), **kw)
+
+
+def test_waf_events_from_one_ip_trigger_r7():
+    sig = run_waf([waf("203.0.113.7", 0, s) for s in range(5)])
+    assert len(sig) == 1 and sig[0]["rule"] == "R7-waf-crs"
+    assert sig[0]["ip"] == "203.0.113.7" and sig[0]["count"] == 5
+    assert sig[0]["sample_requests"] == ["/alerts [942100,949110]"]
+    assert sig[0]["request_ids"] == ["ab" * 16]  # mismo $request_id que rid= en access.log
+
+
+def test_few_waf_events_do_not_trigger_r7():
+    assert run_waf([waf("203.0.113.7", 0, s) for s in range(4)]) == []
+    assert run_waf([waf("203.0.113.7", m * 10) for m in range(5)]) == []  # fuera de la ventana de 5 min
+
+
+def test_r7_signal_never_copies_request_data():
+    lines = [waf("203.0.113.7", 0, s, uri="/auth/login?token=eyJhbGciOi&x=1", secret="S3cr3t-Pass!") for s in range(6)]
+    out = json.dumps(run_waf(lines))
+    assert "S3cr3t-Pass!" not in out and "eyJhbGciOi" not in out and "Matched" not in out
+    assert "/auth/login [942100,949110]" in out
+
+
+def test_r7_ignores_status_only_entries_and_malformed_lines():
+    no_rules = [waf("203.0.113.7", 0, s, ids=()) for s in range(10)]  # 5xx sin reglas: no es del WAF
+    bad_ids = [waf("203.0.113.8", 0, s, ids=("942100; rm -rf /",)) for s in range(10)]
+    bad_ip = [waf("no-es-ip", 0, s) for s in range(10)]
+    junk = ["no es json", "{}", '{"transaction": 1}', '{"transaction": {"client_ip": "1.2.3.4"}}']
+    assert run_waf(no_rules + bad_ids + bad_ip + junk) == []
+
+
+def test_r7_sanitizes_path_and_request_id():
+    lines = [waf("203.0.113.7", 0, s, uri="/x\x1b[31m\u202e", rid="no-es-un-id") for s in range(5)]
+    sig = run_waf(lines)
+    assert sig[0]["sample_requests"] == ["/x?[31m? [942100,949110]"]
+    assert sig[0]["request_ids"] == []
+
+
+def test_cli_reads_waf_log_with_state(tmp_path):
+    access = tmp_path / "access.log"
+    access.write_text(line("10.0.0.5", 0, 200), encoding="utf-8")
+    log = tmp_path / "audit.json"
+    log.write_text(chr(10).join(waf("203.0.113.7", 0, s) for s in range(5)), encoding="utf-8")
+    state = tmp_path / "state.json"
+    args = [str(access), "--waf-log", str(log), "--state-file", str(state)]
+    assert detect.main(args) == 10
+    assert detect.main(args) == 0  # ya reportada
+    assert detect.main([str(access), "--waf-log", str(tmp_path / "no-existe.json")]) == 0  # R7 omitida
+    assert detect.main([str(access), "--waf-log", str(log), "--waf-threshold", "6"]) == 0

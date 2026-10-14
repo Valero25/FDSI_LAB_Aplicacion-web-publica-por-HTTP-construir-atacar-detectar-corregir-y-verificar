@@ -21,11 +21,17 @@ Reglas (ventana deslizante, por IP de origen):
   por (cuenta, IP) frenan. Solo alerta: no bloquea la cuenta (bloquearla permitiria dejar fuera
   al titular). En la senal, el campo `ip` lleva la cuenta (`login:<usuario>`).
 
+- R7 WAF: >= WAF_UMBRAL peticiones de una misma IP con al menos una regla de ModSecurity/CRS
+  coincidente (audit log JSON de la etapa F) en la ventana. El WAF esta en modo DetectionOnly: no
+  bloquea, asi que esta regla es la que convierte sus eventos en senales. La senal solo lleva IDs de
+  regla, la ruta (sin query string) y la IP: nunca el texto de la coincidencia ni datos de la peticion.
+
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
                              [--audit-log /var/log/muvautomation/actions.log]
                              [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300]
-                             [--account-threshold 10] [--account-window 3600] [--json]
+                             [--account-threshold 10] [--account-window 3600]
+                             [--waf-log /var/log/modsecurity/audit.json] [--waf-threshold 5] [--json]
 Codigo de salida: 0 sin senales, 10 con al menos una senal (2 queda para errores de uso).
 Requiere `sudo ufw logging medium` para que R4 tenga datos.
 
@@ -70,6 +76,9 @@ UFW_RE = re.compile(
 UFW_BLOCK = 1000  # pseudo-status: los bloqueos de ufw no tienen codigo HTTP
 UFW_OUT_BLOCK = 1001  # bloqueo de un paquete que SALE del servidor
 LOGIN_FAILED = 1002  # inicio de sesion fallido (actions.log)
+WAF_EVENT = 1003  # peticion con al menos una regla de ModSecurity/CRS coincidente
+RULE_ID_RE = re.compile(r"^\d{1,7}$")
+RID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 RULES = {
     "R1-enumeracion-404": {404},
@@ -78,6 +87,7 @@ RULES = {
     "R4-escaneo-ufw-block": {UFW_BLOCK},
     "R5-salida-bloqueada-ufw": {UFW_OUT_BLOCK},
     "R6-punteria-contra-cuenta": {LOGIN_FAILED},
+    "R7-waf-crs": {WAF_EVENT},
 }
 
 
@@ -153,6 +163,44 @@ def parse_audit(lines):
         yield actor[:80], ts, LOGIN_FAILED, str(entry.get("client_ip") or "-")[:64], None
 
 
+def _waf_path(uri) -> str:
+    """Solo la ruta, sin query string, acotada y con caracteres imprimibles: nada mas de la peticion."""
+    path = str(uri or "-").split("?", 1)[0][:100]
+    return "".join(c if 33 <= ord(c) < 127 else "?" for c in path) or "-"
+
+
+def _waf_rule_ids(messages) -> list[str]:
+    """IDs de regla (solo digitos) de los mensajes; se descarta el resto del mensaje (match, data)."""
+    ids = set()
+    for m in messages if isinstance(messages, list) else []:
+        details = m.get("details") if isinstance(m, dict) else None
+        rule_id = str(details.get("ruleId", "")) if isinstance(details, dict) else ""
+        if RULE_ID_RE.match(rule_id):
+            ids.add(rule_id)
+    return sorted(ids, key=int)
+
+
+def parse_waf(lines):
+    """Devuelve (ip, datetime, WAF_EVENT, "ruta [ids]", request_id) por cada transaccion del audit log
+    JSON de libmodsecurity con al menos una regla coincidente. Las transacciones registradas solo por
+    su estado (5xx, sin mensajes) no son eventos del WAF y se ignoran."""
+    for line in lines:
+        try:
+            tx = json.loads(line)["transaction"]
+            ip = str(ipaddress.ip_address(tx["client_ip"]))
+            # time_stamp sin zona ("Wed Oct 14 12:00:00 2026"): es la hora local del servidor.
+            ts = datetime.strptime(" ".join(str(tx["time_stamp"]).split()), "%a %b %d %H:%M:%S %Y").astimezone()
+            ids = _waf_rule_ids(tx.get("messages"))
+            request = tx.get("request")
+            uri = request.get("uri") if isinstance(request, dict) else None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+        if not ids:
+            continue
+        rid = str(tx.get("unique_id") or "")
+        yield ip, ts, WAF_EVENT, f"{_waf_path(uri)} [{','.join(ids[:5])}]", rid if RID_RE.match(rid) else None
+
+
 def detect(
     events,
     threshold: int = 5,
@@ -160,6 +208,7 @@ def detect(
     ufw_threshold: int = 5,
     account_threshold: int = 10,
     account_window_s: int = 3600,
+    waf_threshold: int = 5,
 ) -> list[dict]:
     """Aplica las reglas; una senal por (regla, IP) con la ventana de mayor concentracion."""
     by_key: dict[tuple[str, str], list[tuple[datetime, str, object]]] = defaultdict(list)
@@ -181,7 +230,10 @@ def detect(
                 best = (end - start + 1, start)
         count, first = best
         limit = (
-            account_threshold if rule.startswith("R6") else ufw_threshold if rule.startswith(("R4", "R5")) else threshold
+            account_threshold if rule.startswith("R6")
+            else ufw_threshold if rule.startswith(("R4", "R5"))
+            else waf_threshold if rule.startswith("R7")
+            else threshold
         )
         if count >= limit:
             window = hits[first : first + count]
@@ -253,6 +305,8 @@ def main(argv=None) -> int:
     ap.add_argument("--audit-log", help="actions.log de la app (activa R6: punteria contra una cuenta)")
     ap.add_argument("--account-threshold", type=int, default=10)
     ap.add_argument("--account-window", type=int, default=3600, help="segundos")
+    ap.add_argument("--waf-log", help="audit log JSON de ModSecurity (activa R7)")
+    ap.add_argument("--waf-threshold", type=int, default=5)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -270,11 +324,18 @@ def main(argv=None) -> int:
                 events += list(parse_audit(fh))
         except OSError as exc:  # sin audit log solo se pierde R6
             print(f"[AVISO] R6 omitida: no se pudo leer {args.audit_log}: {exc.strerror}", file=sys.stderr)
+    if args.waf_log:
+        try:
+            with open(args.waf_log, encoding="utf-8", errors="replace") as fh:
+                events += list(parse_waf(fh))
+        except OSError as exc:  # sin audit log del WAF (WAF no instalado) solo se pierde R7
+            print(f"[AVISO] R7 omitida: no se pudo leer {args.waf_log}: {exc.strerror}", file=sys.stderr)
     state = load_state(args.state_file) if args.state_file else {}
     if state:
         events = list(drop_reported(events, state))
     signals = detect(
-        events, args.threshold, args.window, args.ufw_threshold, args.account_threshold, args.account_window
+        events, args.threshold, args.window, args.ufw_threshold, args.account_threshold, args.account_window,
+        args.waf_threshold,
     )
     if args.state_file and signals:
         for s in signals:
