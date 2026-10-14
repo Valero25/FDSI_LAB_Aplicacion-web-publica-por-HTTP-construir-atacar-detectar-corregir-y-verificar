@@ -2,7 +2,10 @@
 
 Reglas (ventana deslizante, por IP de origen):
 - R1 enumeracion:  >= UMBRAL respuestas 404 en la ventana (por defecto 5 en 300 s).
-- R2 fuerza bruta: >= UMBRAL respuestas 401 o 429 en la ventana.
+- R2 fuerza bruta: >= UMBRAL respuestas 401 o 429 en la ventana. Incluye los 429 del limite de Nginx
+  (limit_req/limit_conn): cada rechazo queda en access.log con estado 429. Las lineas "limiting
+  requests ... zone" de error.log son el MISMO evento (solo anaden la zona), por eso no se cuentan:
+  duplicarian R2. error.log sirve para la investigacion (que zona: muv_api o muv_auth).
 - R3 abuso de privilegios: >= UMBRAL respuestas 403 en la ventana (un lector que intenta
   escalate/close, o metodos HTTP no permitidos por Nginx).
 - R4 escaneo de puertos: >= UFW_UMBRAL conexiones bloqueadas por ufw ([UFW BLOCK]) desde una
