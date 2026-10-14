@@ -75,6 +75,11 @@ def test_no_modsecurity_v2_only_directives():
             assert bad is None or rest.strip().strip('"').lower() != bad, (name, ln)
 
 
+def test_json_depth_limit_is_low():
+    # Los cuerpos de la API son objetos planos; el recomendado de v3 usa 512.
+    assert 2 <= int(value("modsecurity.conf", "SecRequestBodyJsonDepthLimit")) <= 32
+
+
 def test_json_body_processor_for_application_json_and_plus_json():
     rule = next(ln for ln in directives("modsecurity.conf") if "id:200001" in ln)
     assert "ctl:requestBodyProcessor=JSON" in rule and "t:lowercase" in rule
