@@ -25,8 +25,17 @@ def value(name, directive):
     return found[0].strip('"')
 
 
-def test_engine_is_detection_only():
-    assert value("modsecurity.conf", "SecRuleEngine") == "DetectionOnly"
+def test_engine_blocks_by_default():
+    # Etapa I: el valor del repo es el seguro (bloqueo). harden-host.sh con WAF_MODE=detection lo
+    # cambia a DetectionOnly en el despliegue; el archivo versionado nunca debe quedar en detection.
+    assert value("modsecurity.conf", "SecRuleEngine") == "On"
+
+
+def test_harden_host_has_waf_mode_switch():
+    harden = (ROOT / "deploy" / "harden-host.sh").read_text(encoding="utf-8")
+    assert 'WAF_MODE="${WAF_MODE:-blocking}"' in harden
+    assert "s/^SecRuleEngine On$/SecRuleEngine DetectionOnly/" in harden
+    assert 'WAF_MODE debe ser blocking o detection' in harden
 
 
 def test_audit_log_has_no_request_headers_body_or_response():
@@ -138,3 +147,51 @@ def test_waf_covers_the_whole_https_server():
     snippet = directives("waf.conf")
     assert "modsecurity on;" in snippet
     assert "modsecurity_rules_file /etc/nginx/fdsi-lab3-modsecurity/main.conf;" in snippet
+
+
+# --- Etapa I: bloqueo, exclusiones por ruta y campo, metodos y tipos -------------------------------
+
+ATTACK_FAMILIES = ("attack-sqli", "attack-xss", "attack-rce", "attack-lfi")
+
+
+def test_only_global_removal_is_920350():
+    # SecRuleRemoveById/ByTag globales: solo 920350 (Host por IP). Nunca una familia de ataque entera.
+    for ln in directives("exclusiones.conf"):
+        if ln.startswith(("SecRuleRemoveById", "SecRuleRemoveByTag", "SecRuleRemoveByMsg")):
+            assert ln == "SecRuleRemoveById 920350", ln
+    # Ninguna familia de ataque se quita de forma global (siempre con ;ARGS:json.<campo>).
+    text = (WAF / "exclusiones.conf").read_text(encoding="utf-8")
+    for family in ATTACK_FAMILIES:
+        for m in re.finditer(r"ruleRemoveTargetByTag=" + re.escape(family) + r"(;ARGS:[^,\"\s]+)?", text):
+            assert m.group(1), f"{family} sin campo concreto"
+
+
+def test_field_exclusions_are_bound_to_a_route():
+    # Cada SecRule con ctl:ruleRemoveTarget* debe filtrar por REQUEST_FILENAME (una ruta concreta).
+    text = re.sub(r"\\n\s*", " ", (WAF / "exclusiones.conf").read_text(encoding="utf-8"))
+    for block in re.findall(r"SecRule[^\n]*ruleRemoveTargetByTag[^\n]*", text):
+        assert "REQUEST_FILENAME" in block
+        assert "/alerts" in block
+        # Solo se excluyen los campos de texto libre, por nombre json.<campo>.
+        targets = set(re.findall(r"ARGS:(json\.[a-z_]+)", block))
+        assert targets <= {"json.description", "json.technique", "json.tactic", "json.note"}, targets
+        # Nunca se excluyen campos sensibles ni de control.
+        assert not (targets & {"json.severity", "json.source_ip", "json.hostname"})
+
+
+def test_allowed_methods_and_content_type_restricted():
+    setup = re.sub(r"\\n\s*", " ", (WAF / "crs-setup.conf").read_text(encoding="utf-8"))
+    assert "setvar:'tx.allowed_methods=GET HEAD POST'" in setup
+    assert "setvar:'tx.allowed_request_content_type=|application/json|'" in setup
+
+
+def test_blocked_response_is_small_generic_json():
+    https = nginx_conf.https_server(nginx_conf.site_text())
+    assert "error_page 403 = @blocked" in nginx_conf.top_level(https)
+    blocked = nginx_conf.top_level(nginx_conf.block(https, "location @blocked"))
+    assert "internal" in blocked
+    assert 'default_type application/json' in blocked
+    assert any(d.startswith("return 403 ") and "Request blocked" in d for d in blocked)
+    # No revela la regla ni menciona el WAF.
+    body = (ROOT / "nginx" / "muvautomation.conf").read_text(encoding="utf-8")
+    assert "modsec" not in nginx_conf.block(https, "location @blocked").lower()
