@@ -161,6 +161,40 @@ else
   echo "   unattended-upgrades no esta instalado: sudo apt install -y unattended-upgrades (parches de seguridad automaticos)"
 fi
 if systemctl cat nginx >/dev/null 2>&1; then
+  # Virtual host del repo (rate limit muv_auth, cabeceras, TLS). Antes se copiaba a mano y en la VM
+  # quedo una version vieja sin el limite del login. Los certificados que referencia no se generan aqui.
+  NGX_SITE=/etc/nginx/sites-available/fdsi-lab3
+  NGX_LINK=/etc/nginx/sites-enabled/fdsi-lab3
+  NGX_SITE_CHANGED=no
+  NGX_SITE_BACKUP=""
+  NGX_LINK_CREATED=no
+  if ! cmp -s "$REPO/nginx/muvautomation.conf" "$NGX_SITE"; then
+    if [ -f "$NGX_SITE" ]; then
+      NGX_SITE_BACKUP="/root/fdsi-lab3.nginx.$(date +%Y%m%d-%H%M%S).bak"
+      cp -a "$NGX_SITE" "$NGX_SITE_BACKUP"
+    fi
+    install -m 644 "$REPO/nginx/muvautomation.conf" "$NGX_SITE"
+    NGX_SITE_CHANGED=yes
+  fi
+  if [ ! -e "$NGX_LINK" ]; then
+    ln -sfn "$NGX_SITE" "$NGX_LINK"   # -f: reemplaza un enlace roto que haya quedado
+    NGX_LINK_CREATED=yes
+    NGX_SITE_CHANGED=yes
+  fi
+  if [ "$NGX_SITE_CHANGED" = yes ]; then
+    if NGX_TEST="$(nginx -t 2>&1)"; then
+      # No se recarga aqui: el reinicio con el sandbox (abajo) la carga, asi nginx no se reinicia dos veces.
+      echo "   configuracion de Nginx instalada en $NGX_SITE${NGX_SITE_BACKUP:+ (respaldo: $NGX_SITE_BACKUP)}"
+    else
+      # Configuracion invalida: se restaura lo anterior para que nginx siga sirviendo con ella.
+      if [ -n "$NGX_SITE_BACKUP" ]; then install -m 644 "$NGX_SITE_BACKUP" "$NGX_SITE"; else rm -f "$NGX_SITE"; fi
+      if [ "$NGX_LINK_CREATED" = yes ]; then rm -f "$NGX_LINK"; fi
+      if nginx -t >/dev/null 2>&1; then systemctl reload nginx || true; fi
+      echo "   AVISO: nginx -t rechazo nginx/muvautomation.conf; se restauro la configuracion anterior (el limite del login puede no estar activo)."
+      echo "   Salida de nginx -t:"; printf '%s\n' "$NGX_TEST" | sed 's/^/     /'
+      echo "   Revise certificados TLS y sitios duplicados en /etc/nginx/sites-enabled (p. ej. default o muvautomation)."
+    fi
+  fi
   NGX_DROPIN=/etc/systemd/system/nginx.service.d/hardening.conf
   install -D -m 644 "$REPO/deploy/nginx-hardening.conf" "$NGX_DROPIN"
   systemctl daemon-reload
