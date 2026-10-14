@@ -22,9 +22,14 @@ Reglas (ventana deslizante, por IP de origen):
   al titular). En la senal, el campo `ip` lleva la cuenta (`login:<usuario>`).
 
 - R7 WAF: >= WAF_UMBRAL peticiones de una misma IP con al menos una regla de ModSecurity/CRS
-  coincidente (audit log JSON de la etapa F) en la ventana. El WAF esta en modo DetectionOnly: no
-  bloquea, asi que esta regla es la que convierte sus eventos en senales. La senal solo lleva IDs de
-  regla, la ruta (sin query string) y la IP: nunca el texto de la coincidencia ni datos de la peticion.
+  coincidente (audit log JSON) en la ventana. El campo `blocked` cuenta cuantas alcanzaron el umbral
+  de bloqueo (regla 949110/959100): en modo bloqueo son 403, en DetectionOnly se habrian bloqueado.
+  La senal solo lleva IDs de regla, la ruta (sin query string) y la IP: nunca el texto de la
+  coincidencia ni datos de la peticion.
+  Nota R3/R7: en modo bloqueo el WAF responde 403, asi que esas peticiones tambien las cuenta R3
+  (>=5 respuestas 403 en access.log). Es deliberado: R3 funciona solo con access.log (aunque falte
+  el audit log del WAF o este apagado) y R7 anade el detalle del WAF (que reglas, bloqueado o no).
+  El access.log no distingue un 403 del WAF de uno de limit_except o de la app, por eso no se separan.
 
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
@@ -79,6 +84,10 @@ LOGIN_FAILED = 1002  # inicio de sesion fallido (actions.log)
 WAF_EVENT = 1003  # peticion con al menos una regla de ModSecurity/CRS coincidente
 RULE_ID_RE = re.compile(r"^\d{1,7}$")
 RID_RE = re.compile(r"^[0-9a-f]{32}$")
+# CRS deniega cuando el puntaje de anomalia supera el umbral: 949110 (entrada) y 959100 (salida). Su
+# presencia marca que la transaccion alcanzo el umbral de bloqueo: en modo On se bloqueo (403); en
+# DetectionOnly se habria bloqueado. El resto de eventos solo coincidio con alguna regla (detectado).
+WAF_BLOCKING_RULE_IDS = {"949110", "959100"}
 
 RULES = {
     "R1-enumeracion-404": {404},
@@ -180,10 +189,15 @@ def _waf_rule_ids(messages) -> list[str]:
     return sorted(ids, key=int)
 
 
+BLOCKED_TAG = "bloqueado"  # marca de un bloqueo registrado solo por estado (CRS marca sus reglas noauditlog)
+
+
 def parse_waf(lines):
     """Devuelve (ip, datetime, WAF_EVENT, "ruta [ids]", request_id) por cada transaccion del audit log
-    JSON de libmodsecurity con al menos una regla coincidente. Las transacciones registradas solo por
-    su estado (5xx, sin mensajes) no son eventos del WAF y se ignoran."""
+    JSON de libmodsecurity que sea un evento del WAF: con reglas coincidentes (modo deteccion) o un
+    bloqueo registrado por estado 403 (modo bloqueo; CRS marca sus reglas noauditlog, el detalle de la
+    regla queda en error.log, correlacionable por rid). Las transacciones sin reglas ni 403 (p. ej. un
+    5xx) se ignoran."""
     for line in lines:
         try:
             tx = json.loads(line)["transaction"]
@@ -191,14 +205,31 @@ def parse_waf(lines):
             # time_stamp sin zona ("Wed Oct 14 12:00:00 2026"): es la hora local del servidor.
             ts = datetime.strptime(" ".join(str(tx["time_stamp"]).split()), "%a %b %d %H:%M:%S %Y").astimezone()
             ids = _waf_rule_ids(tx.get("messages"))
-            request = tx.get("request")
-            uri = request.get("uri") if isinstance(request, dict) else None
+            request = tx.get("request") if isinstance(tx.get("request"), dict) else {}
+            uri = request.get("uri")
+            http_code = (tx.get("response") or {}).get("http_code") if isinstance(tx.get("response"), dict) else None
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
-        if not ids:
+        blocked = http_code == 403 or bool(set(ids) & WAF_BLOCKING_RULE_IDS)
+        if not ids and not blocked:
             continue
         rid = str(tx.get("unique_id") or "")
-        yield ip, ts, WAF_EVENT, f"{_waf_path(uri)} [{','.join(ids[:5])}]", rid if RID_RE.match(rid) else None
+        if ids:
+            # La(s) regla(s) de bloqueo se muestran primero para que no queden fuera del recorte a 5.
+            shown = [i for i in ids if i in WAF_BLOCKING_RULE_IDS] + [i for i in ids if i not in WAF_BLOCKING_RULE_IDS]
+            tag = ",".join(shown[:5])
+            if blocked and not set(ids) & WAF_BLOCKING_RULE_IDS:
+                tag += f",{BLOCKED_TAG}"  # bloqueo por estado con reglas detectadas pero sin la de umbral
+        else:
+            tag = BLOCKED_TAG  # bloqueo sin reglas en el audit (los IDs estan en error.log, por rid)
+        yield ip, ts, WAF_EVENT, f"{_waf_path(uri)} [{tag}]", rid if RID_RE.match(rid) else None
+
+
+def _waf_req_blocked(req: str) -> bool:
+    """True si la cadena de un evento R7 indica bloqueo: regla 949110/959100 o la marca BLOCKED_TAG."""
+    inside = req[req.find("[") + 1 : req.rfind("]")] if "[" in req and "]" in req else ""
+    tokens = {i.strip() for i in inside.split(",")}
+    return bool(tokens & WAF_BLOCKING_RULE_IDS) or BLOCKED_TAG in tokens
 
 
 def detect(
@@ -237,18 +268,20 @@ def detect(
         )
         if count >= limit:
             window = hits[first : first + count]
-            signals.append(
-                {
-                    "rule": rule,
-                    "ip": ip,
-                    "count": count,
-                    "first_seen": window[0][0].isoformat(),
-                    "last_seen": window[-1][0].isoformat(),
-                    "sample_requests": sorted({r for _, r, _ in window})[:3],
-                    # Para buscar el mismo evento en actions.log (campo request_id).
-                    "request_ids": sorted({rid for _, _, rid in window if rid})[:3],
-                }
-            )
+            signal = {
+                "rule": rule,
+                "ip": ip,
+                "count": count,
+                "first_seen": window[0][0].isoformat(),
+                "last_seen": window[-1][0].isoformat(),
+                "sample_requests": sorted({r for _, r, _ in window})[:3],
+                # Para buscar el mismo evento en actions.log (campo request_id).
+                "request_ids": sorted({rid for _, _, rid in window if rid})[:3],
+            }
+            if rule.startswith("R7"):
+                # Cuantas transacciones de la ventana alcanzaron el umbral de bloqueo del WAF.
+                signal["blocked"] = sum(1 for _, r, _ in window if _waf_req_blocked(r))
+            signals.append(signal)
     return sorted(signals, key=lambda s: (-s["count"], s["ip"]))
 
 
@@ -351,7 +384,8 @@ def main(argv=None) -> int:
         else:
             print(
                 f"[SENAL] {s['rule']} ip={s['ip']} eventos={s['count']} "
-                f"{s['first_seen']} -> {s['last_seen']} ej={s['sample_requests']}"
+                + (f"bloqueados={s['blocked']} " if "blocked" in s else "")
+                + f"{s['first_seen']} -> {s['last_seen']} ej={s['sample_requests']}"
                 + (f" request_id={s['request_ids']}" if s["request_ids"] else "")
             )
     if not signals:

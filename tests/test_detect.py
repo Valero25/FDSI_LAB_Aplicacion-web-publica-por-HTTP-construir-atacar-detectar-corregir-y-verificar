@@ -234,7 +234,8 @@ def test_cli_reads_audit_log(tmp_path):
 # --- R7: eventos del WAF (audit log JSON de ModSecurity) ------------------------------------------
 
 
-def waf(ip, minute, second=0, ids=("942100", "949110"), uri="/alerts", rid="ab" * 16, secret="S3cr3t-Pass!"):
+def waf(ip, minute, second=0, ids=("942100", "949110"), uri="/alerts", rid="ab" * 16, secret="S3cr3t-Pass!",
+        http_code=200):
     """Transaccion como la escribe libmodsecurity (SecAuditLogFormat JSON, partes A, H y Z)."""
     messages = [
         {"message": "SQL Injection Attack Detected via libinjection",
@@ -247,7 +248,7 @@ def waf(ip, minute, second=0, ids=("942100", "949110"), uri="/alerts", rid="ab" 
         # Hora local del servidor y sin zona, como en libmodsecurity.
         "time_stamp": at(minute, second).astimezone().strftime("%a %b %d %H:%M:%S %Y"),
         "unique_id": rid, "request": {"method": "POST", "http_version": 2.0, "uri": uri},
-        "response": {"http_code": 200}, "messages": messages,
+        "response": {"http_code": http_code}, "messages": messages,
     }})
 
 
@@ -259,8 +260,21 @@ def test_waf_events_from_one_ip_trigger_r7():
     sig = run_waf([waf("203.0.113.7", 0, s) for s in range(5)])
     assert len(sig) == 1 and sig[0]["rule"] == "R7-waf-crs"
     assert sig[0]["ip"] == "203.0.113.7" and sig[0]["count"] == 5
-    assert sig[0]["sample_requests"] == ["/alerts [942100,949110]"]
+    # La regla de bloqueo (949110) va primero para no quedar fuera del recorte.
+    assert sig[0]["sample_requests"] == ["/alerts [949110,942100]"]
     assert sig[0]["request_ids"] == ["ab" * 16]  # mismo $request_id que rid= en access.log
+
+
+def test_r7_distinguishes_blocked_from_detected():
+    # 949110 presente: la transaccion alcanzo el umbral de bloqueo (403 en modo On).
+    blocked = run_waf([waf("203.0.113.7", 0, s, ids=("942100", "949110")) for s in range(5)])
+    assert blocked[0]["blocked"] == 5
+    # Alguna regla coincidio pero sin llegar al umbral: detectado, no bloqueado.
+    detected = run_waf([waf("203.0.113.8", 0, s, ids=("942100",)) for s in range(5)])
+    assert detected[0]["blocked"] == 0
+    # Mezcla: solo cuenta como bloqueadas las que tienen la regla de bloqueo.
+    mixed = run_waf([waf("203.0.113.9", 0, s, ids=("942100", "949110") if s < 3 else ("942100",)) for s in range(5)])
+    assert mixed[0]["count"] == 5 and mixed[0]["blocked"] == 3
 
 
 def test_few_waf_events_do_not_trigger_r7():
@@ -272,11 +286,19 @@ def test_r7_signal_never_copies_request_data():
     lines = [waf("203.0.113.7", 0, s, uri="/auth/login?token=eyJhbGciOi&x=1", secret="S3cr3t-Pass!") for s in range(6)]
     out = json.dumps(run_waf(lines))
     assert "S3cr3t-Pass!" not in out and "eyJhbGciOi" not in out and "Matched" not in out
-    assert "/auth/login [942100,949110]" in out
+    assert "/auth/login [949110,942100]" in out
+
+
+def test_r7_blocked_by_status_without_rule_ids():
+    # Modo bloqueo: CRS marca sus reglas noauditlog, el audit log registra el bloqueo por estado 403
+    # sin IDs (los IDs estan en error.log, por rid). Igual cuenta como R7 y como bloqueado.
+    sig = run_waf([waf("203.0.113.7", 0, s, ids=(), http_code=403) for s in range(5)])
+    assert len(sig) == 1 and sig[0]["count"] == 5 and sig[0]["blocked"] == 5
+    assert sig[0]["sample_requests"] == ["/alerts [bloqueado]"]
 
 
 def test_r7_ignores_status_only_entries_and_malformed_lines():
-    no_rules = [waf("203.0.113.7", 0, s, ids=()) for s in range(10)]  # 5xx sin reglas: no es del WAF
+    no_rules = [waf("203.0.113.7", 0, s, ids=()) for s in range(10)]  # 200 sin reglas: no es del WAF
     bad_ids = [waf("203.0.113.8", 0, s, ids=("942100; rm -rf /",)) for s in range(10)]
     bad_ip = [waf("no-es-ip", 0, s) for s in range(10)]
     junk = ["no es json", "{}", '{"transaction": 1}', '{"transaction": {"client_ip": "1.2.3.4"}}']
@@ -286,7 +308,7 @@ def test_r7_ignores_status_only_entries_and_malformed_lines():
 def test_r7_sanitizes_path_and_request_id():
     lines = [waf("203.0.113.7", 0, s, uri="/x\x1b[31m\u202e", rid="no-es-un-id") for s in range(5)]
     sig = run_waf(lines)
-    assert sig[0]["sample_requests"] == ["/x?[31m? [942100,949110]"]
+    assert sig[0]["sample_requests"] == ["/x?[31m? [949110,942100]"]
     assert sig[0]["request_ids"] == []
 
 
