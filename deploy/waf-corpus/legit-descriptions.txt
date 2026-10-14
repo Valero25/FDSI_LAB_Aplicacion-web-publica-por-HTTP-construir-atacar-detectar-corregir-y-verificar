@@ -1,0 +1,13 @@
+# Corpus de descripciones LEGITIMAS de alertas (texto de un EDR que describe ataques reales). En modo
+# bloqueo NINGUNA debe dar 403: por eso se excluye el texto libre de POST /alerts. Una por linea; las
+# lineas que empiezan por # se ignoran. Sin secretos. Ampliar con casos reales del laboratorio.
+<img src=x onerror=alert(1)><script>alert(2)</script>
+Escaneo de puertos desde el segmento de laboratorio hacia 192.168.61.129
+Inicio de sesion inusual del analista fuera del horario habitual
+Ejecucion sospechosa: powershell -enc <cadena base64> en WEB-LAB-01
+Proceso hijo cmd.exe /c whoami lanzado por el servidor web
+Lectura del archivo /etc/passwd por un proceso no privilegiado
+Intento de acceso a C:\Windows\System32\config\SAM
+Consulta con patron "UNION SELECT" detectada en el registro de la aplicacion
+Comando de reconocimiento "net user /domain" ejecutado en el host
+Transferencia saliente a un dominio recien registrado

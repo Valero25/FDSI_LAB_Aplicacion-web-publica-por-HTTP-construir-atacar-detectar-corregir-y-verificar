@@ -1,0 +1,13 @@
+# Sondas que el WAF SI debe bloquear (403) en modo bloqueo: el mismo tipo de contenido que el corpus
+# legitimo, pero en posiciones NO excluidas (campo hostname, query string, cabecera). Comprueba que las
+# exclusiones son por campo y ruta y no abren un hueco. Formato: donde|valor
+#   donde = body:<campo> | query:<nombre> | header:<Nombre>
+# Una por linea; las lineas con # se ignoran. Ampliar con mas categorias/campos segun haga falta.
+body:hostname|' UNION SELECT username, password FROM users--
+body:hostname|<script>alert(document.cookie)</script>
+body:hostname|../../../../etc/passwd
+body:hostname|; cat /etc/passwd; whoami
+query:id|' OR 1=1--
+query:q|<script>alert(1)</script>
+query:path|../../../../etc/passwd
+header:User-Agent|sqlmap/1.7-dev
