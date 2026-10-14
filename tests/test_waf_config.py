@@ -6,6 +6,8 @@ cambiar sin darse cuenta, sobre todo que el audit log no pueda contener secretos
 import re
 from pathlib import Path
 
+import nginx_conf
+
 ROOT = Path(__file__).resolve().parent.parent
 WAF = ROOT / "nginx" / "modsecurity"
 
@@ -122,14 +124,16 @@ def test_load_order_privacy_before_crs_and_exclusions_after():
     assert includes[3].endswith("/rules/*.conf")
 
 
-def test_waf_enabled_only_in_https_server():
-    site = (ROOT / "nginx" / "muvautomation.conf").read_text(encoding="utf-8")
-    servers = site.split("server {")[1:]
-    https = [s for s in servers if "listen 443" in s]
-    http = [s for s in servers if "listen 80" in s]
-    assert len(https) == 1 and len(http) == 1
-    assert "include /etc/nginx/fdsi-lab3-waf.d/*.conf;" in https[0]
-    assert "fdsi-lab3-waf.d" not in http[0] and "modsecurity" not in http[0]
+def test_waf_enabled_only_for_the_api_in_https_server():
+    text = nginx_conf.site_text()
+    https = nginx_conf.https_server(text)
+    waf = "include /etc/nginx/fdsi-lab3-waf.d/*.conf"
+    # Solo en la API (location /): ni en el :80, ni en el server entero, ni en el frontend estatico.
+    assert waf in nginx_conf.top_level(nginx_conf.block(https, "location /"))
+    assert waf not in nginx_conf.top_level(https)
+    assert "fdsi-lab3-waf.d" not in nginx_conf.block(https, "location ^~ /app/")
+    http = nginx_conf.http_server(text)
+    assert "fdsi-lab3-waf.d" not in http and "modsecurity" not in http
     snippet = directives("waf.conf")
     assert "modsecurity on;" in snippet
     assert "modsecurity_rules_file /etc/nginx/fdsi-lab3-modsecurity/main.conf;" in snippet
