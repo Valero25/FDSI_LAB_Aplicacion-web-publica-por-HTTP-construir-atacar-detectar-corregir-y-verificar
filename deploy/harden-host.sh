@@ -213,6 +213,35 @@ if systemctl cat nginx >/dev/null 2>&1; then
     fi
   fi
 
+  # Etapa G: frontend estatico del analista (frontend/ -> /var/www/fdsi-lab3, servido en /app/).
+  # root:root, directorio 755 y archivos 644: www-data (Nginx) solo puede leerlo. Se arma aparte y se
+  # cambia de una vez, para que Nginx nunca sirva una mezcla de version vieja y nueva.
+  WEB_DIR=/var/www/fdsi-lab3
+  if ! diff -rq "$REPO/frontend" "$WEB_DIR" >/dev/null 2>&1; then
+    WEB_BACKUP=""
+    install -d -m 755 -o root -g root /var/www
+    if [ -d "$WEB_DIR" ]; then
+      WEB_BACKUP="/root/fdsi-lab3-www.$(date +%Y%m%d-%H%M%S).bak"
+      cp -a "$WEB_DIR" "$WEB_BACKUP"
+    fi
+    WEB_NEW="$(mktemp -d /var/www/.fdsi-lab3.XXXXXX)"
+    # Solo HTML, JS y CSS (lo que comprueba tests/test_frontend.py): nada oculto ni de otro tipo.
+    install -m 644 -o root -g root "$REPO"/frontend/*.html "$REPO"/frontend/*.js "$REPO"/frontend/*.css "$WEB_NEW"/
+    chmod 755 "$WEB_NEW"
+    rm -rf "$WEB_DIR"
+    mv "$WEB_NEW" "$WEB_DIR"
+    if NGX_TEST="$(nginx -t 2>&1)"; then
+      echo "   frontend instalado en $WEB_DIR${WEB_BACKUP:+ (respaldo: $WEB_BACKUP)}"
+    else
+      # Los estaticos no cambian la configuracion, pero se sigue el mismo patron: si algo falla, se
+      # vuelve a la version anterior.
+      rm -rf "$WEB_DIR"
+      if [ -n "$WEB_BACKUP" ]; then cp -a "$WEB_BACKUP" "$WEB_DIR"; fi
+      echo "   AVISO: nginx -t fallo tras instalar el frontend; se restauro la version anterior."
+      echo "   Salida de nginx -t:"; printf '%s\n' "$NGX_TEST" | sed 's/^/     /'
+    fi
+  fi
+
   # Etapa F: WAF ModSecurity v3 + OWASP CRS en modo solo deteccion. El sitio lo carga con
   # "include /etc/nginx/fdsi-lab3-waf.d/*.conf": sin ese archivo, el sitio sirve igual pero sin WAF.
   # WAF_ENABLE=no lo retira. Rutas de los paquetes de Ubuntu: comprobarlas en la VM antes (ver README).
