@@ -12,7 +12,7 @@ REPO=/opt/fdsi-lab3
 
 # IP de la sesion SSH: la usan la comprobacion contra LAB_CIDR y el ignoreip de fail2ban.
 if [ -z "${SSH_CLIENT:-}" ]; then
-  WHO_IP="$(who -m 2>/dev/null | sed -n 's/.*(\([0-9a-fA-F:.]*\)).*//p' | head -n1)"
+  WHO_IP="$(who -m 2>/dev/null | sed -n 's/.*(\([0-9a-fA-F:.]*\)).*/\1/p' | head -n1)"
   if [ -n "$WHO_IP" ]; then SSH_CLIENT="$WHO_IP 0 22"; fi
 fi
 [ -n "${SSH_CLIENT:-}" ] || echo "AVISO: no se pudo determinar su IP SSH; no se valida contra LAB_CIDR ni se agrega a ignoreip de fail2ban."
