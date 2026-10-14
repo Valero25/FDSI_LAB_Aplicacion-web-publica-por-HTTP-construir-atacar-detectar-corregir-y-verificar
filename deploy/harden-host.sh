@@ -8,6 +8,16 @@ set -euo pipefail
 : "${LAB_CIDR:?Defina LAB_CIDR, p. ej. 192.168.61.0/24}"
 : "${ADMIN_USER:?Defina ADMIN_USER (usuario que administra por SSH)}"
 REPO=/opt/fdsi-lab3
+
+# Unidades de systemd: se instalan solo si cambiaron y se hace un unico daemon-reload (evita el aviso
+# NeedDaemonReload y recargas innecesarias en cada ejecucion).
+UNITS_CHANGED=no
+install_unit() {
+  if ! cmp -s "$1" "$2"; then install -D -m 644 "$1" "$2"; UNITS_CHANGED=yes; fi
+}
+reload_units_once() {
+  if [ "$UNITS_CHANGED" = yes ]; then systemctl daemon-reload; UNITS_CHANGED=no; fi
+}
 [ "$(id -u)" -eq 0 ] || { echo "Ejecutar con sudo"; exit 1; }
 
 # IP de la sesion SSH: la usan la comprobacion contra LAB_CIDR y el ignoreip de fail2ban.
@@ -143,8 +153,9 @@ if command -v fail2ban-client >/dev/null; then
 else
   echo "   fail2ban no esta instalado: sudo apt install -y fail2ban y repita"
 fi
-install -m 644 "$REPO/deploy/muvautomation-detect.service" /etc/systemd/system/muvautomation-detect.service
-install -m 644 "$REPO/deploy/muvautomation-detect.timer" /etc/systemd/system/muvautomation-detect.timer
+install_unit "$REPO/deploy/muvautomation-detect.service" /etc/systemd/system/muvautomation-detect.service
+install_unit "$REPO/deploy/muvautomation-detect.timer" /etc/systemd/system/muvautomation-detect.timer
+install_unit "$REPO/deploy/muvautomation-api.service" /etc/systemd/system/muvautomation-api.service
 
 echo "[8] Endurecimiento de kernel/red, auditoria y Nginx (best effort: un fallo aqui no deja el host inseguro)"
 install -m 644 "$REPO/deploy/sysctl-hardening.conf" /etc/sysctl.d/99-lab3.conf
@@ -183,33 +194,45 @@ if systemctl cat nginx >/dev/null 2>&1; then
   fi
   if [ "$NGX_SITE_CHANGED" = yes ]; then
     if NGX_TEST="$(nginx -t 2>&1)"; then
-      # No se recarga aqui: el reinicio con el sandbox (abajo) la carga, asi nginx no se reinicia dos veces.
+      # Se aplica abajo: con el reinicio si cambia el sandbox y, si no, con reload (nunca las dos cosas).
       echo "   configuracion de Nginx instalada en $NGX_SITE${NGX_SITE_BACKUP:+ (respaldo: $NGX_SITE_BACKUP)}"
     else
       # Configuracion invalida: se restaura lo anterior para que nginx siga sirviendo con ella.
       if [ -n "$NGX_SITE_BACKUP" ]; then install -m 644 "$NGX_SITE_BACKUP" "$NGX_SITE"; else rm -f "$NGX_SITE"; fi
       if [ "$NGX_LINK_CREATED" = yes ]; then rm -f "$NGX_LINK"; fi
       if nginx -t >/dev/null 2>&1; then systemctl reload nginx || true; fi
+      NGX_SITE_CHANGED=no
       echo "   AVISO: nginx -t rechazo nginx/muvautomation.conf; se restauro la configuracion anterior (el limite del login puede no estar activo)."
       echo "   Salida de nginx -t:"; printf '%s\n' "$NGX_TEST" | sed 's/^/     /'
       echo "   Revise certificados TLS y sitios duplicados en /etc/nginx/sites-enabled (p. ej. default o muvautomation)."
     fi
   fi
   NGX_DROPIN=/etc/systemd/system/nginx.service.d/hardening.conf
-  install -D -m 644 "$REPO/deploy/nginx-hardening.conf" "$NGX_DROPIN"
-  systemctl daemon-reload
-  if nginx -t >/dev/null 2>&1 && systemctl restart nginx && sleep 1 && systemctl is-active --quiet nginx; then
-    echo "   nginx activo con el sandbox de systemd"
+  NGX_DROPIN_CHANGED=no
+  cmp -s "$REPO/deploy/nginx-hardening.conf" "$NGX_DROPIN" || NGX_DROPIN_CHANGED=yes
+  install_unit "$REPO/deploy/nginx-hardening.conf" "$NGX_DROPIN"
+  reload_units_once
+  if [ "$NGX_DROPIN_CHANGED" = yes ] || ! systemctl is-active --quiet nginx; then
+    if nginx -t >/dev/null 2>&1 && systemctl restart nginx && sleep 1 && systemctl is-active --quiet nginx; then
+      echo "   nginx activo con el sandbox de systemd"
+    else
+      # Reversion: si nginx no vuelve a levantar con el sandbox, se retira el drop-in.
+      rm -f "$NGX_DROPIN"; systemctl daemon-reload; systemctl restart nginx || true
+      echo "   AVISO: nginx no arranco con el sandbox; se revirtio el drop-in (revise: journalctl -u nginx)"
+    fi
+  elif [ "$NGX_SITE_CHANGED" = yes ]; then
+    if systemctl reload nginx; then
+      echo "   nginx recargado con la configuracion nueva"
+    else
+      echo "   AVISO: no se pudo recargar nginx (revise: journalctl -u nginx)"
+    fi
   else
-    # Reversion: si nginx no vuelve a levantar con el sandbox, se retira el drop-in.
-    rm -f "$NGX_DROPIN"; systemctl daemon-reload; systemctl restart nginx || true
-    echo "   AVISO: nginx no arranco con el sandbox; se revirtio el drop-in (revise: journalctl -u nginx)"
+    echo "   nginx sin cambios"
   fi
 fi
 
 echo "[7] Servicio"
-install -m 644 "$REPO/deploy/muvautomation-api.service" /etc/systemd/system/muvautomation-api.service
-systemctl daemon-reload
+reload_units_once   # no hace nada si ya se recargo en el paso de Nginx o si ninguna unidad cambio
 systemctl enable muvautomation-api muvautomation-detect.timer
 # restart (no "enable --now"): tras un git pull, el codigo nuevo se carga aunque la API ya estuviera activa.
 systemctl restart muvautomation-api
