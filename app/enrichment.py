@@ -106,7 +106,7 @@ def abuseipdb_check(source_ip: Optional[str]) -> dict:
         f"{ABUSEIPDB_URL}?{query}", headers={"Key": api_key, "Accept": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=ABUSEIPDB_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=ABUSEIPDB_TIMEOUT_S) as resp:  # nosec B310 - esquema https fijo en la constante de AbuseIPDB
             data = json.loads(resp.read(ABUSEIPDB_MAX_BYTES))["data"]
         score = data["abuseConfidenceScore"]
         reports = data.get("totalReports", 0)
