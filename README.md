@@ -168,17 +168,16 @@ curl -i http://127.0.0.1:8000/alerts                                # 401
 - **Modo (interruptor):** el repo trae `SecRuleEngine On` (bloquea; etapa I). `WAF_MODE=blocking` es el valor por defecto de `harden-host.sh`; **`WAF_MODE=detection` vuelve a solo registro** en un solo comando (ver «En emergencia» abajo). Reglas de CRS en paranoia 1, umbrales por defecto; métodos restringidos a `GET HEAD POST` y tipo de contenido a `application/json`.
 - **Exclusiones (`nginx/modsecurity/exclusiones.conf`):** el texto libre de las alertas describe ataques reales. Se excluyen las familias SQLi/XSS/RCE/LFI **solo** en `description`, `technique` y `tactic` de `POST /alerts` y en `note` de `POST /alerts/{id}/actions`, por el nombre `ARGS:json.<campo>`. El resto de campos, la query string y las cabeceras siguen inspeccionados. Esos campos quedan sin WAF **a propósito**: la app los guarda como texto con consultas parametrizadas y el frontend los pinta con `textContent` + CSP + Trusted Types (riesgo residual A32 en `risk-register.md`).
 - **Bloqueo:** una petición maliciosa recibe `403 {"detail":"Request blocked"}` (cuerpo genérico, sin revelar la regla ni el WAF; mismo 403 que `limit_except`). Lleva el `X-Request-ID` (= `rid`) para correlacionar.
-- **Registro:** `/var/log/modsecurity/audit.json` (JSON, directorio `root:adm 0750`, rotación diaria). En modo bloqueo CRS marca sus reglas `noauditlog`, así que el bloqueo se registra por estado (`403`) con la ruta y el `unique_id` (= `rid`), **sin** los IDs de regla; el detalle de qué regla bloqueó está en `error.log`, correlacionable por `rid`. El audit log no contiene cabeceras ni cuerpo de la petición ni la respuesta (`SecAuditLogParts AHZ`); `password`, `otp`, `refresh_token` y las cabeceras `Authorization`/`X-API-Key`/`X-Analyst-Key`/`Cookie` no se inspeccionan (A26).
-- **Detección y respuesta:** R7 de `detect.py` señala una IP con ≥5 eventos del WAF en 5 min e indica cuántos fueron bloqueos (`blocked`). El jail `fdsi-modsecurity` de fail2ban veta en `ufw` una IP con ≥10 bloqueos en 10 min.
+- **Registros:** los bloqueos del WAF van al `error.log` de Nginx (`ModSecurity: Access denied with code 403`, con `[id "949110"]`, `[uri]`, `[unique_id]` y `[client <IP>]`). Un 403 de la aplicación (denegación por rol) **no** escribe ahí: así se distingue un bloqueo del WAF de un 403 de negocio. El audit log privado `/var/log/modsecurity/audit.json` (`SecAuditLogParts AHZ`, `RelevantOnly` solo 5xx; `root:adm 0750`) guarda las coincidencias de regla en modo detección y los 5xx, **sin** cabeceras ni cuerpo; `password`, `otp`, `refresh_token` y las cabeceras `Authorization`/`X-API-Key`/`X-Analyst-Key`/`Cookie` no se inspeccionan (A26).
+- **Detección y respuesta:** R7 de `detect.py` lee el `error.log`, agrupa por `unique_id` y señala una IP con ≥5 eventos del WAF en 5 min, con cuántos fueron bloqueos (`blocked`); un 403 de la app no se cuenta. El jail `fdsi-modsecurity` de fail2ban cuenta las líneas «Access denied» del `error.log` y veta en `ufw` una IP con ≥10 bloqueos en 10 min.
 
-Leer un bloqueo a partir del `rid` (p. ej. el que devolvió una petición, o el de una señal R7):
+Leer un bloqueo a partir del `rid` (el que devolvió una petición, o el de una señal R7):
 
 ```bash
 RID=<unique_id>
-sudo grep "\"unique_id\": \"$RID\"" /var/log/modsecurity/audit.json   # ruta y hora del bloqueo (sin cuerpo)
-sudo grep "$RID" /var/log/nginx/error.log                             # QUÉ regla(s) de CRS dispararon
-sudo grep "rid=$RID" /var/log/nginx/access.log                        # la misma petición (estado, método)
-sudo grep "\"request_id\": \"$RID\"" /var/log/muvautomation/actions.log  # si llegó a la app (no, si fue bloqueada)
+sudo grep "unique_id \"$RID\"" /var/log/nginx/error.log               # QUÉ regla(s) de CRS y la ruta del bloqueo
+sudo grep "rid=$RID" /var/log/nginx/access.log                        # la misma petición (estado 403, método)
+sudo grep "\"request_id\": \"$RID\"" /var/log/muvautomation/actions.log  # vacío: no llegó a la app (fue bloqueada)
 journalctl -u muvautomation-detect --since today --no-pager | grep R7 # señales R7 (bloqueados=N)
 ```
 
