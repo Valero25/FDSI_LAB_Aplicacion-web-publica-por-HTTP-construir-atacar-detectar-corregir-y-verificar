@@ -670,3 +670,78 @@ def test_analyst_and_emitter_lockouts_stay_separate_for_validation(client):
     for _ in range(5):
         client.post("/alerts/x/actions", content=BROKEN["content"], headers=BROKEN["headers"])
     assert client.post("/alerts", json=ALERT, headers=EMISOR).status_code == 201
+
+
+# --- F-1: solo application/json con cuerpo (el WAF no analiza los tipos "+json") -------------------
+
+ALERT_BYTES = json.dumps({**ALERT, "description": "MARCA-CUERPO-F1"}).encode()
+
+
+def _post_alert(client, content_type, headers=EMISOR, content=ALERT_BYTES):
+    extra = {"Content-Type": content_type} if content_type else {}
+    return client.post("/alerts", content=content, headers={**headers, **extra})
+
+
+@pytest.mark.parametrize("content_type", ["application/vnd.prueba+json", "text/plain", "application/jsonx", None])
+def test_body_with_other_content_type_is_415(client, content_type):
+    rid = "c" * 32
+    r = _post_alert(client, content_type, headers={**EMISOR, "X-Request-ID": rid})
+    assert r.status_code == 415
+    assert r.headers["X-Request-ID"] == rid and r.headers["Cache-Control"] == "no-store"
+    entry = _last_audit_entry("unsupported_media_type")
+    assert entry["request_id"] == rid and entry["actor"] == main.EMITTER_ACTOR
+    assert entry["method"] == "POST" and entry["path"] == "/alerts"
+    assert "MARCA-CUERPO-F1" not in (main.LOG_DIR / "actions.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "application/json; charset=utf-8", "Application/JSON"])
+def test_application_json_is_accepted_as_before(client, content_type):
+    assert _post_alert(client, content_type).status_code == 201
+
+
+def test_post_without_body_still_works_without_content_type(client):
+    assert client.post("/auth/logout", headers=ANA).status_code == 204
+    # Un Content-Type cualquiera sin cuerpo tampoco cambia nada: no hay nada que el WAF deje de ver.
+    assert client.post("/auth/logout", headers={**ANA, "Content-Type": "text/plain"}).status_code == 204
+
+
+def test_logout_with_body_must_be_json(client):
+    body = b'{"refresh_token": "x' + b"y" * 20 + b'"}'
+    r = client.post("/auth/logout", content=body, headers={**ANA, "Content-Type": "application/vnd.prueba+json"})
+    assert r.status_code == 415
+    r = client.post("/auth/logout", content=body, headers={**ANA, "Content-Type": "application/json"})
+    assert r.status_code == 204
+
+
+def test_anonymous_with_plus_json_gets_401_not_415(client):
+    before = [e["action"] for e in _audit_actions()].count("unsupported_media_type")
+    assert _post_alert(client, "application/vnd.prueba+json", headers={}).status_code == 401
+    alert_id = create(client)
+    r = client.post(
+        f"/alerts/{alert_id}/actions", content=b'{"action": "close"}',
+        headers={"Content-Type": "application/vnd.prueba+json"},
+    )
+    assert r.status_code == 401
+    actions = [e["action"] for e in _audit_actions()]
+    assert actions[-1] == "analyst_unauthorized"
+    assert actions.count("unsupported_media_type") == before  # un anonimo no llega al 415
+
+
+def test_authenticated_action_with_plus_json_is_415(client):
+    alert_id = create(client)
+    r = client.post(
+        f"/alerts/{alert_id}/actions", content=b'{"action": "close"}',
+        headers={**ANA, "Content-Type": "application/vnd.prueba+json"},
+    )
+    assert r.status_code == 415
+    assert _last_audit_entry("unsupported_media_type")["actor"] == "analyst:ana"
+
+
+def test_login_with_plus_json_is_415_and_counts_as_failure(client):
+    body = b'{"username": "nadie", "password": "MARCA-PASS-F1"}'
+    for _ in range(main.MAX_AUTH_FAILURES):
+        r = client.post("/auth/login", content=body, headers={"Content-Type": "application/vnd.prueba+json"})
+        assert r.status_code == 415
+    r = client.post("/auth/login", content=body, headers={"Content-Type": "application/vnd.prueba+json"})
+    assert r.status_code == 429  # mismo contador y bloqueo que un login fallido
+    assert "MARCA-PASS-F1" not in (main.LOG_DIR / "actions.log").read_text(encoding="utf-8")

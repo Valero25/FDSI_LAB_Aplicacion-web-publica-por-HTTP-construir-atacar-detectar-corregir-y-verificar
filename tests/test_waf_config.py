@@ -42,9 +42,16 @@ def test_body_limits_match_nginx():
         assert int(value("modsecurity.conf", d)) == 16 * 1024
 
 
-def test_json_body_processor_for_application_json():
+def test_json_body_processor_for_application_json_and_plus_json():
     rule = next(ln for ln in directives("modsecurity.conf") if "id:200001" in ln)
-    assert "application/json" in rule and "ctl:requestBodyProcessor=JSON" in rule
+    assert "ctl:requestBodyProcessor=JSON" in rule and "t:lowercase" in rule
+    pattern = re.compile(re.search(r'"@rx ([^"]+)"', rule).group(1))
+    # La cabecera llega en minusculas (t:lowercase): se prueba con el valor ya transformado.
+    for ctype in ("application/json", "application/json; charset=utf-8", "application/vnd.prueba+json",
+                  "application/problem+json"):
+        assert pattern.search(ctype), ctype
+    for ctype in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data", "text/json"):
+        assert not pattern.search(ctype), ctype
 
 
 def test_body_parse_error_does_not_log_the_body_fragment():

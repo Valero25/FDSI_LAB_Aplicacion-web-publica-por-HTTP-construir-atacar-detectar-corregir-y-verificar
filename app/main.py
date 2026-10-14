@@ -538,23 +538,27 @@ def _resolve_analyst(request: Request) -> Optional[Analyst]:
     return None
 
 
+def _matched_route(request: Request) -> Optional[APIRoute]:
+    """Ruta que coincide por completo (ruta y metodo); None si no hay (404/405 siguen su camino)."""
+    for route in request.app.router.routes:
+        if isinstance(route, APIRoute) and route.matches(request.scope)[0] == Match.FULL:
+            return route
+    return None
+
+
 def _auth_scope(request: Request) -> Optional[str]:
     """Que credencial exige la ruta (None = ruta publica), segun la ruta que coincide y sus
     dependencias: no depende del texto de la URL ni de mantener una lista aparte."""
-    for route in request.app.router.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        match, _child = route.matches(request.scope)
-        if match != Match.FULL:
-            continue
-        if route.endpoint in LOGIN_ENDPOINTS:
-            return "login"
-        calls = {dep.call for dep in route.dependant.dependencies}
-        if require_api_key in calls:
-            return "emitter"
-        if require_analyst in calls:
-            return "analyst"
+    route = _matched_route(request)
+    if route is None:
         return None
+    if route.endpoint in LOGIN_ENDPOINTS:
+        return "login"
+    calls = {dep.call for dep in route.dependant.dependencies}
+    if require_api_key in calls:
+        return "emitter"
+    if require_analyst in calls:
+        return "analyst"
     return None
 
 
@@ -616,6 +620,53 @@ def require_analyst(
 
 REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
+# F-1: el WAF solo analiza como JSON el cuerpo con Content-Type application/json, pero FastAPI tambien
+# acepta tipos "+json" (application/vnd.x+json): con ellos los campos llegarian a la app sin que CRS
+# los viera como argumentos. Con cuerpo, solo se acepta application/json (parametros opcionales, sin
+# distinguir mayusculas). Sin cuerpo (p. ej. POST /auth/logout) no se exige nada, como hasta ahora.
+BODY_METHODS = {"POST", "PUT", "PATCH"}
+
+
+def _has_body(request: Request) -> bool:
+    if "transfer-encoding" in request.headers:
+        return True
+    length = request.headers.get("content-length")
+    if length is None:
+        return False
+    try:
+        return int(length) > 0
+    except ValueError:  # longitud invalida: no se da el cuerpo por vacio
+        return True
+
+
+def _is_json_media_type(value: Optional[str]) -> bool:
+    return value is not None and value.split(";", 1)[0].strip().lower() == "application/json"
+
+
+def _reject_unsupported_media(request: Request) -> Optional[JSONResponse]:
+    """415 para un cuerpo que no es application/json. Mismo orden que el handler de 422 (A21): en
+    rutas autenticadas, sin credencial valida responde 401/429 antes, para que un anonimo no pueda
+    sondear; en login/refresh (sin credencial previa) cuenta como intento fallido, con su bloqueo."""
+    if request.method not in BODY_METHODS or not _has_body(request):
+        return None
+    if _is_json_media_type(request.headers.get("content-type")) or _matched_route(request) is None:
+        return None
+    scope = _auth_scope(request)
+    actor = None
+    if scope == "login":
+        try:
+            _check_not_locked(request, "login_locked_out", "login")
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+        _register_failure(request, "login")
+    elif scope is not None:
+        actor = _authenticate_or_reject(request, scope)
+        if isinstance(actor, JSONResponse):
+            return actor
+    # Rastro de auditoria con ruta, IP, actor y request_id; nunca el cuerpo ni el tipo enviado.
+    log_action(request, "unsupported_media_type", actor=actor, result="unsupported_media_type")
+    return JSONResponse(status_code=415, content={"detail": "Content-Type must be application/json"})
+
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
@@ -623,9 +674,11 @@ async def security_headers(request: Request, call_next):
     # forma esperada (32 hex): un valor ajeno no puede inyectar texto en el audit log.
     supplied = request.headers.get("x-request-id", "")
     request.state.request_id = supplied if REQUEST_ID_RE.fullmatch(supplied) else uuid.uuid4().hex
+    # Antes de que FastAPI analice el cuerpo; la respuesta 415 lleva igual las cabeceras de abajo.
+    rejection = _reject_unsupported_media(request)
     # Defensa en profundidad: aunque Nginx se omita, la app no sirve respuestas cacheables
     # ni embebibles. Las respuestas contienen datos de alertas: nunca deben cachearse.
-    response = await call_next(request)
+    response = rejection if rejection is not None else await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
