@@ -103,7 +103,8 @@ scripts/
 tests/
 └── test_api.py                    # pruebas de los controles y de los motores
 nginx/
-└── muvautomation.conf             # :80 -> 301, :443 TLS + hardening -> 127.0.0.1:8000
+├── muvautomation.conf             # :80 -> 301, :443 TLS + hardening -> 127.0.0.1:8000
+└── modsecurity/                   # WAF ModSecurity v3 + OWASP CRS (etapa F, solo detección)
 deploy/
 ├── muvautomation-api.service      # unidad systemd con sandboxing
 └── muvautomation.env.example      # plantilla de secretos (el archivo real va en /etc y no se versiona)
@@ -155,6 +156,32 @@ curl -i http://127.0.0.1:8000/alerts                                # 401
 - Parte 1 (HTTP): [INFORME.md, Anexo](INFORME.md#anexo--procedimiento-de-despliegue-en-ubuntu-paso-a-paso).
 - Parte 2 (HTTPS + hardening): [INFORME_PARTE2.md §8](INFORME_PARTE2.md#8-cambios-implementados). Explica, en un orden seguro, cómo generar el certificado, configurar los secretos, systemd, Nginx, `ufw` (entrada y salida), SSH y los permisos.
 - **Dependencia de la hora (NTS):** el filtrado de salida permite TCP 4460 solo hacia `185.125.190.0/24` y `91.189.91.0/24` (servidores NTS de Canonical que usa `chrony`). De la hora dependen la caducidad de los JWT y de los tokens de renovación y la ventana de TOTP. Si Canonical cambia esos rangos, la regla R5 de `detect.py` mostrará los bloqueos salientes hacia el puerto 4460 y `sudo chronyc -N authdata` mostrará el fallo del intercambio de claves; en ese caso hay que actualizar las dos reglas de `deploy/harden-host.sh`.
+
+## WAF (etapa F): ModSecurity v3 + OWASP CRS en modo solo detección
+
+`deploy/harden-host.sh` instala `libnginx-mod-http-modsecurity` y `modsecurity-crs` (si faltan), copia `nginx/modsecurity/` a `/etc/nginx/fdsi-lab3-modsecurity/` y activa el WAF **solo en el server :443** con `/etc/nginx/fdsi-lab3-waf.d/waf.conf`. Si `nginx -t` falla con el WAF, restaura la versión anterior o retira ese archivo: el sitio sigue sirviendo sin WAF. `WAF_ENABLE=no` lo retira a propósito.
+
+- **Modo:** `SecRuleEngine DetectionOnly`. Las reglas de CRS (paranoia 1, umbrales por defecto) se evalúan y se registran, pero no bloquean nada hasta que la etapa I ajuste los falsos positivos de los campos de texto libre de las alertas (`nginx/modsecurity/exclusiones.conf`).
+- **Registro:** `/var/log/modsecurity/audit.json` (JSON, una transacción por línea, directorio `root:adm 0750`, rotación diaria). Solo se registran las peticiones con alguna regla coincidente (o un 5xx). El id de cada transacción es el mismo `$request_id` de `rid=` en `access.log` y `request_id` en `actions.log`.
+- **Privacidad:** el audit log no contiene cabeceras ni cuerpo de la petición ni la respuesta (`SecAuditLogParts AHZ`). CRS no inspecciona `password`, `otp` ni `refresh_token` en `/auth/*` ni las cabeceras `Authorization`, `X-API-Key`, `X-Analyst-Key` y `Cookie`, para que el texto de una coincidencia nunca pueda copiarlas (`nginx/modsecurity/privacidad.conf`; riesgo residual en A26 de `risk-register.md`).
+- **Detección:** la regla R7 de `detect.py` genera una señal cuando una IP acumula ≥5 peticiones con eventos del WAF en 5 minutos. La señal lleva solo los IDs de regla, la ruta (sin query string) y la IP.
+
+Ver los eventos (solo fecha, IP, ruta e IDs de regla; nunca el texto de la coincidencia):
+
+```bash
+sudo python3 - <<'EOF'
+import json
+for line in open("/var/log/modsecurity/audit.json", encoding="utf-8", errors="replace"):
+    try:
+        t = json.loads(line)["transaction"]
+    except (ValueError, KeyError):
+        continue
+    ids = sorted({m["details"]["ruleId"] for m in t.get("messages", [])}, key=int)
+    print(t["time_stamp"], t["client_ip"], t["request"]["uri"].split("?")[0], ",".join(ids), t.get("unique_id", ""))
+EOF
+journalctl -u muvautomation-detect --since today --no-pager | grep R7     # señales R7
+sudo grep 'rid=<unique_id>' /var/log/nginx/access.log                      # la misma petición en Nginx
+```
 
 ## URL publicada
 
