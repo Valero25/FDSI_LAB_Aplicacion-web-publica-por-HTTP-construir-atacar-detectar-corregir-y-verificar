@@ -124,14 +124,15 @@ def test_load_order_privacy_before_crs_and_exclusions_after():
     assert includes[3].endswith("/rules/*.conf")
 
 
-def test_waf_enabled_only_for_the_api_in_https_server():
+def test_waf_covers_the_whole_https_server():
     text = nginx_conf.site_text()
     https = nginx_conf.https_server(text)
     waf = "include /etc/nginx/fdsi-lab3-waf.d/*.conf"
-    # Solo en la API (location /): ni en el :80, ni en el server entero, ni en el frontend estatico.
-    assert waf in nginx_conf.top_level(nginx_conf.block(https, "location /"))
-    assert waf not in nginx_conf.top_level(https)
-    assert "fdsi-lab3-waf.d" not in nginx_conf.block(https, "location ^~ /app/")
+    # G-1: a nivel del server :443 (API, / y frontend), una sola vez y no repetido en ningun location.
+    assert waf in nginx_conf.top_level(https)
+    assert https.count("fdsi-lab3-waf.d") == 1
+    for header in ("location /", "location ^~ /app/", "location = /"):
+        assert "fdsi-lab3-waf.d" not in nginx_conf.block(https, header), header
     http = nginx_conf.http_server(text)
     assert "fdsi-lab3-waf.d" not in http and "modsecurity" not in http
     snippet = directives("waf.conf")
