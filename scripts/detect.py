@@ -21,22 +21,23 @@ Reglas (ventana deslizante, por IP de origen):
   por (cuenta, IP) frenan. Solo alerta: no bloquea la cuenta (bloquearla permitiria dejar fuera
   al titular). En la senal, el campo `ip` lleva la cuenta (`login:<usuario>`).
 
-- R7 WAF: >= WAF_UMBRAL peticiones de una misma IP con al menos una regla de ModSecurity/CRS
-  coincidente (audit log JSON) en la ventana. El campo `blocked` cuenta cuantas alcanzaron el umbral
-  de bloqueo (regla 949110/959100): en modo bloqueo son 403, en DetectionOnly se habrian bloqueado.
+- R7 WAF: >= WAF_UMBRAL peticiones de una misma IP con al menos una linea de ModSecurity en el
+  error.log de Nginx (agrupadas por unique_id) en la ventana. El campo `blocked` cuenta cuantas se
+  bloquearon ("Access denied with code 403", regla 949110). Un 403 de la aplicacion (p. ej. denegacion
+  por rol) NO escribe en el error.log de ModSecurity, asi que nunca se cuenta como evento del WAF.
   La senal solo lleva IDs de regla, la ruta (sin query string) y la IP: nunca el texto de la
-  coincidencia ni datos de la peticion.
+  coincidencia ni datos de la peticion. En modo bloqueo CRS solo registra la regla de bloqueo 949110;
+  el detalle de la categoria (en modo deteccion) o la correlacion exacta se hacen por el unique_id (rid).
   Nota R3/R7: en modo bloqueo el WAF responde 403, asi que esas peticiones tambien las cuenta R3
-  (>=5 respuestas 403 en access.log). Es deliberado: R3 funciona solo con access.log (aunque falte
-  el audit log del WAF o este apagado) y R7 anade el detalle del WAF (que reglas, bloqueado o no).
-  El access.log no distingue un 403 del WAF de uno de limit_except o de la app, por eso no se separan.
+  (>=5 respuestas 403 en access.log). Es deliberado y complementario: R3 funciona solo con access.log
+  (aunque el WAF este apagado) y R7 anade el detalle del WAF y distingue bloqueado de detectado.
 
 Uso:
     python scripts/detect.py /var/log/nginx/access.log [--ufw-log /var/log/ufw.log]
                              [--audit-log /var/log/muvautomation/actions.log]
                              [--threshold 5] [--ufw-threshold 5] [--state-file F] [--window 300]
                              [--account-threshold 10] [--account-window 3600]
-                             [--waf-log /var/log/modsecurity/audit.json] [--waf-threshold 5] [--json]
+                             [--waf-log /var/log/nginx/error.log] [--waf-threshold 5] [--json]
 Codigo de salida: 0 sin senales, 10 con al menos una senal (2 queda para errores de uso).
 Requiere `sudo ufw logging medium` para que R4 tenga datos.
 
@@ -85,9 +86,24 @@ WAF_EVENT = 1003  # peticion con al menos una regla de ModSecurity/CRS coinciden
 RULE_ID_RE = re.compile(r"^\d{1,7}$")
 RID_RE = re.compile(r"^[0-9a-f]{32}$")
 # CRS deniega cuando el puntaje de anomalia supera el umbral: 949110 (entrada) y 959100 (salida). Su
-# presencia marca que la transaccion alcanzo el umbral de bloqueo: en modo On se bloqueo (403); en
-# DetectionOnly se habria bloqueado. El resto de eventos solo coincidio con alguna regla (detectado).
+# presencia marca que la transaccion alcanzo el umbral de bloqueo.
 WAF_BLOCKING_RULE_IDS = {"949110", "959100"}
+
+# error.log de Nginx con ModSecurity. En modo bloqueo CRS escribe una linea "Access denied with code 403"
+# (regla 949110) por cada peticion bloqueada; en modo deteccion escribe "Warning" por cada regla. Solo son
+# lineas de ModSecurity: un 403 de la aplicacion (p. ej. denegacion por rol) NO aparece aqui, asi que no
+# se cuenta como bloqueo del WAF. Se extraen solo la hora, la IP, el id de regla, la ruta y el unique_id
+# (nunca el texto "Matched Data", que podria llevar la carga de la peticion).
+MODSEC_LINE_RE = re.compile(
+    r"^(?P<ts>\d{4}/\d\d/\d\d \d\d:\d\d:\d\d).*?\[client (?P<ip>[0-9a-fA-F.:]+)\]\s+"
+    r"ModSecurity:\s+(?P<kind>Access denied with code 403|Warning)\b"
+)
+MODSEC_TS_FORMAT = "%Y/%m/%d %H:%M:%S"
+
+
+def _modsec_field(name, line):
+    m = re.search(rf'\[{name} "([^"]*)"\]', line)
+    return m.group(1) if m else None
 
 RULES = {
     "R1-enumeracion-404": {404},
@@ -178,51 +194,49 @@ def _waf_path(uri) -> str:
     return "".join(c if 33 <= ord(c) < 127 else "?" for c in path) or "-"
 
 
-def _waf_rule_ids(messages) -> list[str]:
-    """IDs de regla (solo digitos) de los mensajes; se descarta el resto del mensaje (match, data)."""
-    ids = set()
-    for m in messages if isinstance(messages, list) else []:
-        details = m.get("details") if isinstance(m, dict) else None
-        rule_id = str(details.get("ruleId", "")) if isinstance(details, dict) else ""
-        if RULE_ID_RE.match(rule_id):
-            ids.add(rule_id)
-    return sorted(ids, key=int)
-
-
-BLOCKED_TAG = "bloqueado"  # marca de un bloqueo registrado solo por estado (CRS marca sus reglas noauditlog)
+BLOCKED_TAG = "bloqueado"  # marca de un evento R7 que fue bloqueado (Access denied)
 
 
 def parse_waf(lines):
-    """Devuelve (ip, datetime, WAF_EVENT, "ruta [ids]", request_id) por cada transaccion del audit log
-    JSON de libmodsecurity que sea un evento del WAF: con reglas coincidentes (modo deteccion) o un
-    bloqueo registrado por estado 403 (modo bloqueo; CRS marca sus reglas noauditlog, el detalle de la
-    regla queda en error.log, correlacionable por rid). Las transacciones sin reglas ni 403 (p. ej. un
-    5xx) se ignoran."""
+    """Lee el error.log de Nginx (ModSecurity) y agrupa por peticion (unique_id). Devuelve un evento
+    (ip, datetime, WAF_EVENT, "ruta [ids/bloqueado]", request_id) por cada peticion con al menos una
+    linea de ModSecurity. "Access denied with code 403" marca el bloqueo; "Warning" (modo deteccion) no.
+    Un 403 de la aplicacion no genera lineas de ModSecurity, asi que nunca se cuenta como evento del WAF.
+    Solo se extraen la hora, la IP, el id de regla, la ruta y el unique_id: nunca la carga de la peticion."""
+    events = {}  # clave (unique_id o (ip, ts)) -> dict acumulado por peticion
+    order = []
     for line in lines:
+        m = MODSEC_LINE_RE.match(line)
+        if not m:
+            continue
         try:
-            tx = json.loads(line)["transaction"]
-            ip = str(ipaddress.ip_address(tx["client_ip"]))
-            # time_stamp sin zona ("Wed Oct 14 12:00:00 2026"): es la hora local del servidor.
-            ts = datetime.strptime(" ".join(str(tx["time_stamp"]).split()), "%a %b %d %H:%M:%S %Y").astimezone()
-            ids = _waf_rule_ids(tx.get("messages"))
-            request = tx.get("request") if isinstance(tx.get("request"), dict) else {}
-            uri = request.get("uri")
-            http_code = (tx.get("response") or {}).get("http_code") if isinstance(tx.get("response"), dict) else None
-        except (ValueError, KeyError, TypeError, AttributeError):
+            ip = str(ipaddress.ip_address(m["ip"]))
+            ts = datetime.strptime(m["ts"], MODSEC_TS_FORMAT).astimezone()
+        except (ValueError, TypeError):
             continue
-        blocked = http_code == 403 or bool(set(ids) & WAF_BLOCKING_RULE_IDS)
-        if not ids and not blocked:
-            continue
-        rid = str(tx.get("unique_id") or "")
-        if ids:
-            # La(s) regla(s) de bloqueo se muestran primero para que no queden fuera del recorte a 5.
-            shown = [i for i in ids if i in WAF_BLOCKING_RULE_IDS] + [i for i in ids if i not in WAF_BLOCKING_RULE_IDS]
-            tag = ",".join(shown[:5])
-            if blocked and not set(ids) & WAF_BLOCKING_RULE_IDS:
-                tag += f",{BLOCKED_TAG}"  # bloqueo por estado con reglas detectadas pero sin la de umbral
-        else:
-            tag = BLOCKED_TAG  # bloqueo sin reglas en el audit (los IDs estan en error.log, por rid)
-        yield ip, ts, WAF_EVENT, f"{_waf_path(uri)} [{tag}]", rid if RID_RE.match(rid) else None
+        rule_id = _modsec_field("id", line)
+        uri = _modsec_field("uri", line)
+        rid = _modsec_field("unique_id", line) or ""
+        key = rid if RID_RE.match(rid) else (ip, line)
+        ev = events.get(key)
+        if ev is None:
+            ev = events[key] = {"ip": ip, "ts": ts, "ids": set(), "blocked": False,
+                                "uri": uri, "rid": rid if RID_RE.match(rid) else None}
+            order.append(key)
+        if rule_id and RULE_ID_RE.match(rule_id):
+            ev["ids"].add(rule_id)
+        if m["kind"].startswith("Access denied"):
+            ev["blocked"] = True
+        if uri and not ev["uri"]:
+            ev["uri"] = uri
+    for key in order:
+        ev = events[key]
+        ids = sorted(ev["ids"], key=int)
+        shown = [i for i in ids if i in WAF_BLOCKING_RULE_IDS] + [i for i in ids if i not in WAF_BLOCKING_RULE_IDS]
+        tag = ",".join(shown[:5]) if shown else BLOCKED_TAG
+        if ev["blocked"] and not set(ids) & WAF_BLOCKING_RULE_IDS and shown:
+            tag += f",{BLOCKED_TAG}"
+        yield ev["ip"], ev["ts"], WAF_EVENT, f"{_waf_path(ev['uri'])} [{tag}]", ev["rid"]
 
 
 def _waf_req_blocked(req: str) -> bool:
@@ -338,7 +352,7 @@ def main(argv=None) -> int:
     ap.add_argument("--audit-log", help="actions.log de la app (activa R6: punteria contra una cuenta)")
     ap.add_argument("--account-threshold", type=int, default=10)
     ap.add_argument("--account-window", type=int, default=3600, help="segundos")
-    ap.add_argument("--waf-log", help="audit log JSON de ModSecurity (activa R7)")
+    ap.add_argument("--waf-log", help="error.log de Nginx con ModSecurity (activa R7; bloqueos del WAF)")
     ap.add_argument("--waf-threshold", type=int, default=5)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)

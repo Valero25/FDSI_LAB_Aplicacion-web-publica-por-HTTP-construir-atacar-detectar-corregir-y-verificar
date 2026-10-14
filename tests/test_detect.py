@@ -231,50 +231,73 @@ def test_cli_reads_audit_log(tmp_path):
     assert detect.main([str(access), "--audit-log", str(tmp_path / "no-existe.log")]) == 0
 
 
-# --- R7: eventos del WAF (audit log JSON de ModSecurity) ------------------------------------------
+# --- R7: eventos del WAF (error.log de Nginx con ModSecurity) -------------------------------------
 
 
-def waf(ip, minute, second=0, ids=("942100", "949110"), uri="/alerts", rid="ab" * 16, secret="S3cr3t-Pass!",
-        http_code=200):
-    """Transaccion como la escribe libmodsecurity (SecAuditLogFormat JSON, partes A, H y Z)."""
-    messages = [
-        {"message": "SQL Injection Attack Detected via libinjection",
-         "details": {"match": f"Matched Data: {secret} found within ARGS:json.password: {secret}",
-                     "data": f"Matched Data: {secret}", "ruleId": rule_id, "severity": "2"}}
-        for rule_id in ids
-    ]
-    return json.dumps({"transaction": {
-        "client_ip": ip, "client_port": 50000, "host_ip": "192.168.61.129", "host_port": 443,
-        # Hora local del servidor y sin zona, como en libmodsecurity.
-        "time_stamp": at(minute, second).astimezone().strftime("%a %b %d %H:%M:%S %Y"),
-        "unique_id": rid, "request": {"method": "POST", "http_version": 2.0, "uri": uri},
-        "response": {"http_code": http_code}, "messages": messages,
-    }})
+def _rid(ip, minute, second):
+    return ("%032x" % (abs(hash((ip, minute, second))) % (16 ** 32)))
 
 
-def run_waf(lines, **kw):
+def modsec_line(ip, minute, second, kind, rule_id, uri, rid, data=""):
+    """Una linea de ModSecurity en el error.log de Nginx (una por regla coincidente)."""
+    ts = at(minute, second).strftime("%Y/%m/%d %H:%M:%S")
+    return (f'{ts} [error] 12#12: *7 [client {ip}] ModSecurity: {kind} (phase 2). '
+            f'Matched "Operator" [file "x.conf"] [line "1"] [id "{rule_id}"] [msg "..."] [data "{data}"] '
+            f'[severity "2"] [tag "attack"] [uri "{uri}"] [unique_id "{rid}"], client: {ip}, '
+            f'server: _, request: "POST {uri} HTTP/1.1", host: "192.168.61.129:443"')
+
+
+def waf(ip, minute, second=0, ids=("949110",), uri="/alerts", rid=None, blocked=True, data=""):
+    """Las lineas de error.log de UNA peticion. En bloqueo: una linea "Access denied" con 949110. En
+    deteccion: una "Warning" por cada regla. Cada peticion lleva su propio unique_id."""
+    rid = rid if rid is not None else _rid(ip, minute, second)
+    out = []
+    for rule_id in ids:
+        kind = "Access denied with code 403" if (blocked and rule_id in ("949110", "959100")) else "Warning"
+        out.append(modsec_line(ip, minute, second, kind, rule_id, uri, rid, data))
+    return out
+
+
+def run_waf(requests, **kw):
+    lines = [ln for req in requests for ln in (req if isinstance(req, list) else [req])]
     return detect.detect(detect.parse_waf(lines), **kw)
 
 
-def test_waf_events_from_one_ip_trigger_r7():
+def test_waf_blocks_from_one_ip_trigger_r7():
     sig = run_waf([waf("203.0.113.7", 0, s) for s in range(5)])
     assert len(sig) == 1 and sig[0]["rule"] == "R7-waf-crs"
-    assert sig[0]["ip"] == "203.0.113.7" and sig[0]["count"] == 5
-    # La regla de bloqueo (949110) va primero para no quedar fuera del recorte.
-    assert sig[0]["sample_requests"] == ["/alerts [949110,942100]"]
-    assert sig[0]["request_ids"] == ["ab" * 16]  # mismo $request_id que rid= en access.log
+    assert sig[0]["ip"] == "203.0.113.7" and sig[0]["count"] == 5 and sig[0]["blocked"] == 5
+    assert sig[0]["sample_requests"] == ["/alerts [949110]"]
+    assert len(sig[0]["request_ids"]) >= 1 and all(len(r) == 32 for r in sig[0]["request_ids"])
 
 
 def test_r7_distinguishes_blocked_from_detected():
-    # 949110 presente: la transaccion alcanzo el umbral de bloqueo (403 en modo On).
-    blocked = run_waf([waf("203.0.113.7", 0, s, ids=("942100", "949110")) for s in range(5)])
+    blocked = run_waf([waf("203.0.113.7", 0, s) for s in range(5)])          # Access denied (949110)
     assert blocked[0]["blocked"] == 5
-    # Alguna regla coincidio pero sin llegar al umbral: detectado, no bloqueado.
-    detected = run_waf([waf("203.0.113.8", 0, s, ids=("942100",)) for s in range(5)])
-    assert detected[0]["blocked"] == 0
-    # Mezcla: solo cuenta como bloqueadas las que tienen la regla de bloqueo.
-    mixed = run_waf([waf("203.0.113.9", 0, s, ids=("942100", "949110") if s < 3 else ("942100",)) for s in range(5)])
-    assert mixed[0]["count"] == 5 and mixed[0]["blocked"] == 3
+    # Modo deteccion: solo "Warning", ninguna "Access denied".
+    detected = run_waf([waf("203.0.113.8", 0, s, ids=("942100", "942190"), blocked=False) for s in range(5)])
+    assert detected[0]["count"] == 5 and detected[0]["blocked"] == 0
+    assert detected[0]["sample_requests"] == ["/alerts [942100,942190]"]
+
+
+def test_r7_groups_error_log_lines_by_request():
+    # Una sola peticion con tres reglas (tres lineas, mismo unique_id) = un evento con tres IDs.
+    one = waf("203.0.113.7", 0, 0, ids=("942100", "942190", "949110"))
+    assert len(one) == 3
+    sig = run_waf([one] + [waf("203.0.113.7", 0, s) for s in range(1, 5)])
+    assert sig[0]["count"] == 5  # cinco peticiones, no siete lineas
+    assert sig[0]["sample_requests"][0].startswith("/alerts [949110")
+
+
+def test_app_403_is_not_a_waf_event():
+    # Un 403 de la aplicacion (denegacion por rol) no escribe lineas de ModSecurity: no es evento R7.
+    app403 = [f'2026/10/14 12:00:0{s} [error] 1#1: *1 upstream sent 403 [client 203.0.113.7] '
+              f'while reading response, request: "POST /alerts/x/actions HTTP/1.1"' for s in range(10)]
+    assert run_waf(app403) == []
+    # Mezcla: 5 bloqueos reales del WAF + 10 lineas de 403 de la app -> R7 cuenta solo los 5 bloqueos.
+    mixed = [waf("203.0.113.7", 0, s) for s in range(5)]
+    sig = detect.detect(detect.parse_waf(app403 + [ln for r in mixed for ln in r]))
+    assert len(sig) == 1 and sig[0]["count"] == 5 and sig[0]["blocked"] == 5
 
 
 def test_few_waf_events_do_not_trigger_r7():
@@ -283,43 +306,40 @@ def test_few_waf_events_do_not_trigger_r7():
 
 
 def test_r7_signal_never_copies_request_data():
-    lines = [waf("203.0.113.7", 0, s, uri="/auth/login?token=eyJhbGciOi&x=1", secret="S3cr3t-Pass!") for s in range(6)]
-    out = json.dumps(run_waf(lines))
-    assert "S3cr3t-Pass!" not in out and "eyJhbGciOi" not in out and "Matched" not in out
-    assert "/auth/login [949110,942100]" in out
+    secret = "S3cr3t-Pass!"
+    reqs = [waf("203.0.113.7", 0, s, ids=("942100", "949110"), uri="/auth/login?token=eyJhbGciOi&x=1",
+                data=f"Matched Data: {secret} found within ARGS:json.password", blocked=True) for s in range(6)]
+    out = json.dumps(run_waf(reqs))
+    assert secret not in out and "eyJhbGciOi" not in out and "Matched" not in out
+    assert "/auth/login [949110,942100]" in out  # ruta sin query string, regla de bloqueo primero
 
 
-def test_r7_blocked_by_status_without_rule_ids():
-    # Modo bloqueo: CRS marca sus reglas noauditlog, el audit log registra el bloqueo por estado 403
-    # sin IDs (los IDs estan en error.log, por rid). Igual cuenta como R7 y como bloqueado.
-    sig = run_waf([waf("203.0.113.7", 0, s, ids=(), http_code=403) for s in range(5)])
-    assert len(sig) == 1 and sig[0]["count"] == 5 and sig[0]["blocked"] == 5
-    assert sig[0]["sample_requests"] == ["/alerts [bloqueado]"]
-
-
-def test_r7_ignores_status_only_entries_and_malformed_lines():
-    no_rules = [waf("203.0.113.7", 0, s, ids=()) for s in range(10)]  # 200 sin reglas: no es del WAF
-    bad_ids = [waf("203.0.113.8", 0, s, ids=("942100; rm -rf /",)) for s in range(10)]
-    bad_ip = [waf("no-es-ip", 0, s) for s in range(10)]
-    junk = ["no es json", "{}", '{"transaction": 1}', '{"transaction": {"client_ip": "1.2.3.4"}}']
-    assert run_waf(no_rules + bad_ids + bad_ip + junk) == []
+def test_r7_ignores_malformed_lines():
+    bad_ip = waf("no-es-ip", 0, 0)
+    bad_id = [modsec_line("203.0.113.8", 0, s, "Access denied with code 403", "94x; rm -rf /", "/alerts",
+                          _rid("203.0.113.8", 0, s)) for s in range(10)]
+    junk = ["no es una linea", "", "2026/13/40 99:99:99 nada"]
+    assert run_waf([bad_ip]) == []          # IP invalida: se descarta
+    sig = detect.detect(detect.parse_waf(bad_id + junk))
+    # Las lineas con id invalido siguen siendo bloqueos (Access denied) pero sin ID valido.
+    assert sig and sig[0]["sample_requests"] == ["/alerts [bloqueado]"]
 
 
 def test_r7_sanitizes_path_and_request_id():
-    lines = [waf("203.0.113.7", 0, s, uri="/x\x1b[31m\u202e", rid="no-es-un-id") for s in range(5)]
-    sig = run_waf(lines)
-    assert sig[0]["sample_requests"] == ["/x?[31m? [949110,942100]"]
-    assert sig[0]["request_ids"] == []
+    reqs = [waf("203.0.113.7", 0, s, uri="/x\x1b[31m\u202e", rid="no-es-un-id") for s in range(5)]
+    sig = run_waf(reqs)
+    assert sig[0]["sample_requests"] == ["/x?[31m? [949110]"]
+    assert sig[0]["request_ids"] == []  # unique_id invalido no se reporta
 
 
 def test_cli_reads_waf_log_with_state(tmp_path):
     access = tmp_path / "access.log"
     access.write_text(line("10.0.0.5", 0, 200), encoding="utf-8")
-    log = tmp_path / "audit.json"
-    log.write_text(chr(10).join(waf("203.0.113.7", 0, s) for s in range(5)), encoding="utf-8")
+    log = tmp_path / "error.log"
+    log.write_text(chr(10).join(ln for s in range(5) for ln in waf("203.0.113.7", 0, s)), encoding="utf-8")
     state = tmp_path / "state.json"
     args = [str(access), "--waf-log", str(log), "--state-file", str(state)]
     assert detect.main(args) == 10
     assert detect.main(args) == 0  # ya reportada
-    assert detect.main([str(access), "--waf-log", str(tmp_path / "no-existe.json")]) == 0  # R7 omitida
+    assert detect.main([str(access), "--waf-log", str(tmp_path / "no-existe.log")]) == 0  # R7 omitida
     assert detect.main([str(access), "--waf-log", str(log), "--waf-threshold", "6"]) == 0
