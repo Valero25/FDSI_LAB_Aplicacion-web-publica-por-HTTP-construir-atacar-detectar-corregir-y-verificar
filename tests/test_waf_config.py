@@ -166,17 +166,21 @@ def test_only_global_removal_is_920350():
             assert m.group(1), f"{family} sin campo concreto"
 
 
-def test_field_exclusions_are_bound_to_a_route():
-    # Cada SecRule con ctl:ruleRemoveTarget* debe filtrar por REQUEST_FILENAME (una ruta concreta).
-    text = re.sub(r"\\n\s*", " ", (WAF / "exclusiones.conf").read_text(encoding="utf-8"))
-    for block in re.findall(r"SecRule[^\n]*ruleRemoveTargetByTag[^\n]*", text):
-        assert "REQUEST_FILENAME" in block
-        assert "/alerts" in block
-        # Solo se excluyen los campos de texto libre, por nombre json.<campo>.
-        targets = set(re.findall(r"ARGS:(json\.[a-z_]+)", block))
-        assert targets <= {"json.description", "json.technique", "json.tactic", "json.note"}, targets
-        # Nunca se excluyen campos sensibles ni de control.
+def test_field_exclusions_are_bound_to_method_and_route():
+    # Une las continuaciones (\ + salto) y separa en sentencias SecRule.
+    joined = re.sub(r"\\\s*\n\s*", " ", (WAF / "exclusiones.conf").read_text(encoding="utf-8"))
+    rules = [s for s in re.split(r"\n(?=SecRule)", joined) if "ctl:ruleRemoveTargetByTag" in s]
+    assert rules, "sin exclusiones de campo"
+    for rule in rules:
+        # Cada exclusion es un chain que arranca por REQUEST_METHOD POST y sigue por REQUEST_FILENAME.
+        assert 'SecRule REQUEST_METHOD "@streq POST"' in rule and "chain" in rule
+        route = re.search(r'chain.*?\n?\s*SecRule REQUEST_FILENAME ("@streq /alerts"|"@rx \^/alerts/[^"]*actions\$")', rule, re.S)
+        assert route, "la exclusion no esta atada a REQUEST_FILENAME /alerts"
+        # Solo campos de texto libre del cuerpo JSON (ARGS:json.<campo>), nunca ARGS_POST ni sensibles.
+        targets = set(re.findall(r"ARGS:(json\.[a-z_]+)", rule))
+        assert targets and targets <= {"json.description", "json.technique", "json.tactic", "json.note"}, targets
         assert not (targets & {"json.severity", "json.source_ip", "json.hostname"})
+        assert "ARGS_POST" not in rule
 
 
 def test_allowed_methods_and_content_type_restricted():
