@@ -22,7 +22,7 @@ OUT = Path(__file__).resolve().parent.parent / "app" / "data" / "mitre_attack_in
 def load_bundle(source: str | None) -> dict:
     if source:
         return json.loads(Path(source).read_text(encoding="utf-8"))
-    with urllib.request.urlopen(BUNDLE_URL, timeout=120) as resp:  # nosec B310 - URL https constante del bundle MITRE
+    with urllib.request.urlopen(BUNDLE_URL, timeout=120) as resp:  # nosec B310  # URL https constante del bundle MITRE
         return json.load(resp)
 
 
