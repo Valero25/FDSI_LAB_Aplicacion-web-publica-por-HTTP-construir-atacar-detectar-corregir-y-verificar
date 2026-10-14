@@ -1,0 +1,13 @@
+# Instalar: sudo install -m 644 deploy/logrotate-modsecurity /etc/logrotate.d/fdsi-lab3-modsecurity
+# Audit log del WAF (etapa F). copytruncate: Nginx mantiene el archivo abierto y no hace falta recargarlo.
+# El directorio es root:adm 0750: las copias rotadas tampoco las lee nadie fuera de root y adm.
+/var/log/modsecurity/audit.json {
+    daily
+    rotate 14
+    maxsize 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

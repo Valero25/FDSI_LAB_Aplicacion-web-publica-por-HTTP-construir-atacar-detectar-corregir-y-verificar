@@ -140,6 +140,7 @@ fi
 
 echo "[6] Rotacion de logs (V10), fail2ban (V12) y deteccion periodica (V-06)"
 install -m 644 "$REPO/deploy/logrotate-muvautomation" /etc/logrotate.d/muvautomation
+install -m 644 "$REPO/deploy/logrotate-modsecurity" /etc/logrotate.d/fdsi-lab3-modsecurity
 if command -v fail2ban-client >/dev/null; then
   install -m 644 "$REPO/deploy/fail2ban/muvautomation.conf" /etc/fail2ban/filter.d/muvautomation.conf
   install -m 644 "$REPO/deploy/fail2ban/jail-muvautomation.local" /etc/fail2ban/jail.d/muvautomation.local
@@ -207,6 +208,71 @@ if systemctl cat nginx >/dev/null 2>&1; then
       echo "   Revise certificados TLS y sitios duplicados en /etc/nginx/sites-enabled (p. ej. default o muvautomation)."
     fi
   fi
+
+  # Etapa F: WAF ModSecurity v3 + OWASP CRS en modo solo deteccion. El sitio lo carga con
+  # "include /etc/nginx/fdsi-lab3-waf.d/*.conf": sin ese archivo, el sitio sirve igual pero sin WAF.
+  # WAF_ENABLE=no lo retira. Rutas de los paquetes de Ubuntu: comprobarlas en la VM antes (ver README).
+  WAF_SRC="$REPO/nginx/modsecurity"
+  WAF_DIR=/etc/nginx/fdsi-lab3-modsecurity
+  WAF_SNIPPET=/etc/nginx/fdsi-lab3-waf.d/waf.conf
+  WAF_FILES="modsecurity.conf crs-setup.conf privacidad.conf exclusiones.conf main.conf"
+  CRS_RULES=/usr/share/modsecurity-crs/rules
+  NGX_WAF_CHANGED=no
+  if [ "${WAF_ENABLE:-yes}" != yes ]; then
+    if [ -f "$WAF_SNIPPET" ]; then rm -f "$WAF_SNIPPET"; NGX_WAF_CHANGED=yes; echo "   WAF retirado (WAF_ENABLE=no)"; fi
+  else
+    WAF_PKGS=""
+    for p in libnginx-mod-http-modsecurity modsecurity-crs; do
+      dpkg -s "$p" >/dev/null 2>&1 || WAF_PKGS="$WAF_PKGS $p"
+    done
+    if [ -n "$WAF_PKGS" ]; then
+      # --no-install-recommends: modsecurity-crs no debe arrastrar el modulo de Apache (ni Apache).
+      # shellcheck disable=SC2086 # lista de paquetes separada por espacios a proposito
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $WAF_PKGS >/dev/null \
+        || echo "   AVISO: no se pudieron instalar:$WAF_PKGS"
+    fi
+    # Audit log: solo root y el grupo adm (el de los logs de Nginx; detect.py lo lee con ese grupo).
+    # El archivo se crea de antemano para www-data por si lo abre un worker y no el proceso maestro.
+    install -d -m 750 -o root -g adm /var/log/modsecurity
+    [ -e /var/log/modsecurity/audit.json ] || install -m 640 -o www-data -g adm /dev/null /var/log/modsecurity/audit.json
+    if ! compgen -G "/etc/nginx/modules-enabled/*modsecurity*" >/dev/null || [ ! -f "$CRS_RULES/REQUEST-901-INITIALIZATION.conf" ]; then
+      echo "   AVISO: falta el modulo ModSecurity de Nginx (modules-enabled) o las reglas CRS en $CRS_RULES; el sitio sigue sin WAF."
+    else
+      for f in $WAF_FILES; do cmp -s "$WAF_SRC/$f" "$WAF_DIR/$f" || NGX_WAF_CHANGED=yes; done
+      cmp -s "$WAF_SRC/waf.conf" "$WAF_SNIPPET" || NGX_WAF_CHANGED=yes
+    fi
+    if [ "$NGX_WAF_CHANGED" = yes ]; then
+      WAF_BACKUP=""
+      if [ -f "$WAF_SNIPPET" ] && [ -d "$WAF_DIR" ]; then
+        WAF_BACKUP="/root/fdsi-lab3-waf.$(date +%Y%m%d-%H%M%S).bak"
+        cp -a "$WAF_DIR" "$WAF_BACKUP"
+        cp -a "$WAF_SNIPPET" "$WAF_BACKUP/waf.conf.snippet"
+      fi
+      install -d -m 755 "$WAF_DIR" "$(dirname "$WAF_SNIPPET")"
+      for f in $WAF_FILES; do install -m 644 "$WAF_SRC/$f" "$WAF_DIR/$f"; done
+      install -m 644 "$WAF_SRC/waf.conf" "$WAF_SNIPPET"
+      if NGX_TEST="$(nginx -t 2>&1)"; then
+        echo "   WAF instalado en modo DetectionOnly${WAF_BACKUP:+ (respaldo: $WAF_BACKUP)}"
+      else
+        # Reversion: primero la version anterior del WAF; si no la habia o tampoco valida, sin WAF.
+        if [ -n "$WAF_BACKUP" ]; then
+          for f in $WAF_FILES; do
+            if [ -f "$WAF_BACKUP/$f" ]; then install -m 644 "$WAF_BACKUP/$f" "$WAF_DIR/$f"; fi
+          done
+          install -m 644 "$WAF_BACKUP/waf.conf.snippet" "$WAF_SNIPPET"
+        else
+          rm -f "$WAF_SNIPPET"
+        fi
+        nginx -t >/dev/null 2>&1 || rm -f "$WAF_SNIPPET"
+        echo "   AVISO: nginx -t rechazo la configuracion del WAF; se restauro ${WAF_BACKUP:+la version anterior del WAF o }el sitio sin WAF."
+        echo "   Salida de nginx -t:"; printf '%s\n' "$NGX_TEST" | sed 's/^/     /'
+        if [ ! -f "$WAF_SNIPPET" ]; then
+          echo "   El sitio sirve SIN WAF. Revise las rutas: dpkg -L modsecurity-crs libnginx-mod-http-modsecurity"
+        fi
+      fi
+    fi
+  fi
+
   NGX_DROPIN=/etc/systemd/system/nginx.service.d/hardening.conf
   NGX_DROPIN_CHANGED=no
   cmp -s "$REPO/deploy/nginx-hardening.conf" "$NGX_DROPIN" || NGX_DROPIN_CHANGED=yes
@@ -220,7 +286,7 @@ if systemctl cat nginx >/dev/null 2>&1; then
       rm -f "$NGX_DROPIN"; systemctl daemon-reload; systemctl restart nginx || true
       echo "   AVISO: nginx no arranco con el sandbox; se revirtio el drop-in (revise: journalctl -u nginx)"
     fi
-  elif [ "$NGX_SITE_CHANGED" = yes ]; then
+  elif [ "$NGX_SITE_CHANGED" = yes ] || [ "$NGX_WAF_CHANGED" = yes ]; then
     if systemctl reload nginx; then
       echo "   nginx recargado con la configuracion nueva"
     else
