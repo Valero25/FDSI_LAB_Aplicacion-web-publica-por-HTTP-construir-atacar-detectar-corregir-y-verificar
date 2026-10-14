@@ -1,0 +1,17 @@
+# Instalar: sudo install -m 644 deploy/fail2ban/jail-modsecurity.local /etc/fail2ban/jail.d/fdsi-modsecurity.local
+# Veta en el firewall la IP que acumula bloqueos del WAF (complementa R7, que solo alerta).
+# Umbral alto a proposito: con las exclusiones de exclusiones.conf el trafico legitimo del analista NO
+# alcanza el umbral de bloqueo (949110), asi que 10 transacciones bloqueadas en 10 min es un atacante
+# sondeando, nunca un falso positivo puntual. banaction ufw[blocktype=deny]: descarte silencioso (un
+# REJECT confirmaria al atacante que hay un firewall). harden-host.sh agrega a ignoreip la IP del
+# administrador (ademas de localhost) para que probar el WAF no pueda autobloquear.
+[fdsi-modsecurity]
+enabled   = true
+filter    = fdsi-modsecurity
+logpath   = /var/log/modsecurity/audit.json
+port      = 443
+banaction = ufw[blocktype=deny]
+maxretry  = 10
+findtime  = 10m
+bantime   = 1h
+ignoreip  = 127.0.0.1/8 ::1

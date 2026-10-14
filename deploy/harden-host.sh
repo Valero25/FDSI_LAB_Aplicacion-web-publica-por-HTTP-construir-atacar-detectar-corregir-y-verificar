@@ -149,10 +149,14 @@ if command -v fail2ban-client >/dev/null; then
   install -m 644 "$REPO/deploy/fail2ban/muvautomation.conf" /etc/fail2ban/filter.d/muvautomation.conf
   install -m 644 "$REPO/deploy/fail2ban/jail-muvautomation.local" /etc/fail2ban/jail.d/muvautomation.local
   install -m 644 "$REPO/deploy/fail2ban/jail-sshd.local" /etc/fail2ban/jail.d/sshd-lab3.local
+  # Etapa I: jail que veta IPs con bloqueos repetidos del WAF (solo si el WAF esta activo).
+  install -m 644 "$REPO/deploy/fail2ban/modsecurity.conf" /etc/fail2ban/filter.d/fdsi-modsecurity.conf
+  install -m 644 "$REPO/deploy/fail2ban/jail-modsecurity.local" /etc/fail2ban/jail.d/fdsi-modsecurity.local
   # La IP del administrador no debe poder autobloquearse (3 llaves erroneas = ban de 1 h).
   if [ -n "${SSH_CLIENT:-}" ]; then
     ADMIN_IP="${SSH_CLIENT%% *}"
-    sed -i "s|^ignoreip.*|ignoreip  = 127.0.0.1/8 ::1 ${ADMIN_IP}|"       /etc/fail2ban/jail.d/muvautomation.local /etc/fail2ban/jail.d/sshd-lab3.local
+    sed -i "s|^ignoreip.*|ignoreip  = 127.0.0.1/8 ::1 ${ADMIN_IP}|" \
+      /etc/fail2ban/jail.d/muvautomation.local /etc/fail2ban/jail.d/sshd-lab3.local /etc/fail2ban/jail.d/fdsi-modsecurity.local
   fi
   systemctl restart fail2ban
 else
@@ -242,14 +246,20 @@ if systemctl cat nginx >/dev/null 2>&1; then
     fi
   fi
 
-  # Etapa F: WAF ModSecurity v3 + OWASP CRS en modo solo deteccion. El sitio lo carga con
+  # Etapa F/I: WAF ModSecurity v3 + OWASP CRS. El sitio lo carga con
   # "include /etc/nginx/fdsi-lab3-waf.d/*.conf": sin ese archivo, el sitio sirve igual pero sin WAF.
-  # WAF_ENABLE=no lo retira. Rutas de los paquetes de Ubuntu: comprobarlas en la VM antes (ver README).
+  # WAF_ENABLE=no lo retira. WAF_MODE=blocking (por defecto) bloquea; WAF_MODE=detection solo registra
+  # (vuelta atras en un solo comando si algo legitimo se rompe). Rutas de los paquetes: ver README.
   WAF_SRC="$REPO/nginx/modsecurity"
   WAF_DIR=/etc/nginx/fdsi-lab3-modsecurity
   WAF_SNIPPET=/etc/nginx/fdsi-lab3-waf.d/waf.conf
   WAF_FILES="modsecurity.conf crs-setup.conf privacidad.conf exclusiones.conf main.conf"
   CRS_RULES=/usr/share/modsecurity-crs/rules
+  WAF_MODE="${WAF_MODE:-blocking}"
+  case "$WAF_MODE" in
+    blocking|detection) ;;
+    *) echo "ABORTO: WAF_MODE debe ser blocking o detection (recibido: $WAF_MODE)"; exit 1 ;;
+  esac
   NGX_WAF_CHANGED=no
   if [ "${WAF_ENABLE:-yes}" != yes ]; then
     if [ -f "$WAF_SNIPPET" ]; then rm -f "$WAF_SNIPPET"; NGX_WAF_CHANGED=yes; echo "   WAF retirado (WAF_ENABLE=no)"; fi
@@ -277,8 +287,17 @@ if systemctl cat nginx >/dev/null 2>&1; then
     if ! compgen -G "/etc/nginx/modules-enabled/*modsecurity*" >/dev/null || [ ! -f "$CRS_RULES/REQUEST-901-INITIALIZATION.conf" ]; then
       echo "   AVISO: falta el modulo ModSecurity de Nginx (modules-enabled) o las reglas CRS en $CRS_RULES; el sitio sigue sin WAF."
     else
-      for f in $WAF_FILES; do cmp -s "$WAF_SRC/$f" "$WAF_DIR/$f" || NGX_WAF_CHANGED=yes; done
-      cmp -s "$WAF_SRC/waf.conf" "$WAF_SNIPPET" || NGX_WAF_CHANGED=yes
+      # Preparacion: se copian los archivos del repo a un area temporal y, SOLO en modo detection, se
+      # cambia alli la unica linea del motor. El repo no se toca; la comparacion es contra lo preparado,
+      # para que cambiar de modo (o volver) se detecte como cambio y se reinstale.
+      WAF_STAGE="$(mktemp -d)"
+      for f in $WAF_FILES; do cp "$WAF_SRC/$f" "$WAF_STAGE/$f"; done
+      cp "$WAF_SRC/waf.conf" "$WAF_STAGE/waf.conf"
+      if [ "$WAF_MODE" = detection ]; then
+        sed -i 's/^SecRuleEngine On$/SecRuleEngine DetectionOnly/' "$WAF_STAGE/modsecurity.conf"
+      fi
+      for f in $WAF_FILES; do cmp -s "$WAF_STAGE/$f" "$WAF_DIR/$f" || NGX_WAF_CHANGED=yes; done
+      cmp -s "$WAF_STAGE/waf.conf" "$WAF_SNIPPET" || NGX_WAF_CHANGED=yes
     fi
     if [ "$NGX_WAF_CHANGED" = yes ]; then
       WAF_BACKUP=""
@@ -288,10 +307,10 @@ if systemctl cat nginx >/dev/null 2>&1; then
         cp -a "$WAF_SNIPPET" "$WAF_BACKUP/waf.conf.snippet"
       fi
       install -d -m 755 "$WAF_DIR" "$(dirname "$WAF_SNIPPET")"
-      for f in $WAF_FILES; do install -m 644 "$WAF_SRC/$f" "$WAF_DIR/$f"; done
-      install -m 644 "$WAF_SRC/waf.conf" "$WAF_SNIPPET"
+      for f in $WAF_FILES; do install -m 644 "$WAF_STAGE/$f" "$WAF_DIR/$f"; done
+      install -m 644 "$WAF_STAGE/waf.conf" "$WAF_SNIPPET"
       if NGX_TEST="$(nginx -t 2>&1)"; then
-        echo "   WAF instalado en modo DetectionOnly${WAF_BACKUP:+ (respaldo: $WAF_BACKUP)}"
+        echo "   WAF instalado (modo: $WAF_MODE)${WAF_BACKUP:+ (respaldo: $WAF_BACKUP)}"
       else
         # Reversion: primero la version anterior del WAF; si no la habia o tampoco valida, sin WAF.
         if [ -n "$WAF_BACKUP" ]; then
@@ -310,6 +329,7 @@ if systemctl cat nginx >/dev/null 2>&1; then
         fi
       fi
     fi
+    if [ -n "${WAF_STAGE:-}" ]; then rm -rf "$WAF_STAGE"; fi
   fi
 
   NGX_DROPIN=/etc/systemd/system/nginx.service.d/hardening.conf
