@@ -678,6 +678,11 @@ def _reject_unsupported_media(request: Request) -> Optional[JSONResponse]:
     return JSONResponse(status_code=415, content={"detail": "Content-Type must be application/json"})
 
 
+# CSP de las respuestas de la API (JSON): nada se carga, nada se embebe, ningun formulario se envia.
+# Es la misma que pone Nginx en el server :443 (nginx/muvautomation.conf).
+API_CSP = "default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     # Nginx genera X-Request-ID ($request_id) y lo registra en access.log. Se acepta solo con la
@@ -694,7 +699,8 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    # form-action y base-uri no heredan de default-src: hay que declararlas (ZAP 10055).
+    response.headers["Content-Security-Policy"] = API_CSP
     return response
 
 

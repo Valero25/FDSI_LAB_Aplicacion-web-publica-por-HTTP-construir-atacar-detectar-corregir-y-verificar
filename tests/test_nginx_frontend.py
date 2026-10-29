@@ -3,6 +3,9 @@ import re
 
 import nginx_conf
 
+# Igual a app.main.API_CSP (test_api.py comprueba la de la app). No se importa app.main aqui: el
+# modulo lee MUV_API_KEY al importarse y test_api.py la define antes.
+API_CSP = "default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 FRONTEND_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
     "form-action 'self'; base-uri 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'"
@@ -19,8 +22,16 @@ def app_location():
 def test_frontend_csp_only_in_its_location():
     https = nginx_conf.https_server(nginx_conf.site_text())
     assert nginx_conf.headers(app_location())["Content-Security-Policy"] == FRONTEND_CSP
-    # La API conserva la suya.
-    assert nginx_conf.headers(https)["Content-Security-Policy"] == "default-src 'none'; frame-ancestors 'none'"
+    # La API conserva la suya, igual a la que pone la app (defensa en profundidad).
+    assert nginx_conf.headers(https)["Content-Security-Policy"] == API_CSP
+
+
+def test_every_csp_declares_directives_without_fallback():
+    # Regresion ZAP 10055: form-action, base-uri y frame-ancestors NO heredan de default-src.
+    https = nginx_conf.https_server(nginx_conf.site_text())
+    for csp in (nginx_conf.headers(https)["Content-Security-Policy"], FRONTEND_CSP, API_CSP):
+        directives = {d.split()[0] for d in csp.split(";") if d.strip()}
+        assert {"form-action", "base-uri", "frame-ancestors"} <= directives, csp
 
 
 def test_frontend_location_repeats_every_server_security_header():
