@@ -205,6 +205,9 @@ def init_db() -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
         for column, sql_type in NEW_COLUMNS.items():
             if column not in existing:
+                # Falso positivo de Semgrep: columna y tipo salen de la constante NEW_COLUMNS, no del
+                # cliente (SQLite no admite parametros para identificadores en ALTER TABLE).
+                # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query, python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 conn.execute(f"ALTER TABLE alerts ADD COLUMN {column} {sql_type}")
         conn.execute(
             """
