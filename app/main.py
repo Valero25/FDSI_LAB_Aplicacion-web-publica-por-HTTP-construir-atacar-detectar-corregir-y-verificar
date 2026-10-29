@@ -388,7 +388,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     write_log(
         "validation_error",
         method=request.method,
-        path=request.url.path[:256],
+        path=route_path(request),
         client_ip=request.client.host if request.client else None,
         actor=actor,
         result="validation_error",
@@ -399,6 +399,16 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 
 # --- Registro de acciones (audit log) --------------------------------------------
+
+
+def route_path(request: Request) -> str:
+    """Ruta que de verdad se enruto (la del request line), acotada para el log.
+
+    No se usa request.url.path: Starlette arma request.url con la cabecera Host, que controla el
+    cliente, y en versiones < 1.3 un Host como "x/auth/refresh?" cambiaba la ruta resultante. Asi
+    un atacante falseaba la ruta del audit log y la accion login_failed/refresh_failed.
+    """
+    return request.scope["path"][:256]
 
 
 def write_log(action: str, **fields) -> None:
@@ -416,7 +426,7 @@ def log_action(
     write_log(
         action,
         method=request.method,
-        path=request.url.path[:256],  # un URL de 8 KB repetido no debe inflar el log
+        path=route_path(request),  # acotada: un URL de 8 KB repetido no debe inflar el log
         client_ip=request.client.host if request.client else None,
         alert_id=alert_id,
         actor=actor,
@@ -583,7 +593,7 @@ def _authenticate_or_reject(request: Request, scope: str):
     if scope == "login":
         # Cuerpo mal formado en login/refresh: cuenta como un intento fallido mas (mismo contador).
         _register_failure(request, "login")
-        action = "refresh_failed" if request.url.path == "/auth/refresh" else "login_failed"
+        action = "refresh_failed" if request.scope["path"] == "/auth/refresh" else "login_failed"
         log_action(request, action, result="unauthorized")
         return JSONResponse(status_code=401, content={"detail": "Invalid credentials"})
     analyst = _resolve_analyst(request)

@@ -145,6 +145,16 @@ def test_login_body_validation_counts_as_failed_attempt_not_422(client):
     assert base._audit_actions()[-1]["action"] == "login_failed"
 
 
+@pytest.mark.parametrize("host", ["lab/auth/refresh?", "lab/alerts#", "lab:8000/x/../auth/refresh?"])
+def test_spoofed_host_cannot_rewrite_audited_path_or_action(client, host):
+    # Regresion (laboratorio FSI, H-3): con Starlette < 1.3 la ruta de request.url salia del Host y
+    # un login fallido quedaba como refresh_failed en /auth/refresh. La app usa scope["path"].
+    r = client.post("/auth/login", content=b"{roto", headers={"Content-Type": "application/json", "Host": host})
+    assert r.status_code == 401
+    entry = base._audit_actions()[-1]
+    assert entry["action"] == "login_failed" and entry["path"] == "/auth/login"
+
+
 def test_login_503_when_identity_is_not_configured(client, monkeypatch):
     monkeypatch.setattr(identity, "enabled", lambda: False)
     assert _login(client).status_code == 503
