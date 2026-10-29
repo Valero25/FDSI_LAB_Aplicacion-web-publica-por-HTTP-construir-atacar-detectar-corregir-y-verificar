@@ -144,6 +144,16 @@ En GitHub, los workflows `Seguridad estatica` (en cada PR) y `DAST staging` (man
 
 El artefacto descargado está en [evidencias/ci/resultado-semgrep/semgrep.json](evidencias/ci/resultado-semgrep/semgrep.json): 0 resultados y 2 errores de parseo parcial, en `deploy/harden-host.sh` y `deploy/waf-smoke.sh`, que es una limitación del analizador de Bash. El SARIF (2 MB) no se versiona; se descarga desde Actions.
 
+### DAST en GitHub Actions (después de fusionar el PR #5)
+
+Se ejecutó el workflow `DAST staging` a mano sobre `main` (`08e2da9`), run `40792582162`. Como no hay variable `STAGING_URL`, el workflow levantó el staging aislado dentro del runner y ZAP analizó `https://localhost:8443/app/`.
+
+| Resultado | Valor |
+|---|---|
+| Resumen | `FAIL-NEW: 0  WARN-NEW: 7  PASS: 61` (igual que el escaneo local posterior a las correcciones) |
+| Alertas medias | Solo la 10202 (falsa alarma F-3). **La 10055 (H-4) ya no aparece** |
+| Informe | [evidencias/ci/informe-zap/informe-zap.html](evidencias/ci/informe-zap/informe-zap.html) (también en [JSON](evidencias/ci/informe-zap/informe-zap.json) y [Markdown](evidencias/ci/informe-zap/informe-zap.md)) |
+
 **Alcance de gitleaks en CI:** en un PR, `gitleaks-action` revisa solo los commits del PR. El historial completo (64 commits, después de los cambios) se revisó con `gitleaks git .` en local: `no leaks found`.
 
 ## 6. Limitaciones
