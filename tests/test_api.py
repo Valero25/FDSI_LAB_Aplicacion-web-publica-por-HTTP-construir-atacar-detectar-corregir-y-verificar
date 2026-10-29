@@ -234,6 +234,10 @@ def test_api_responses_are_not_cacheable_and_have_security_headers(client):
     assert r.headers["cache-control"] == "no-store"
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers["x-frame-options"] == "DENY"
+    # Regresion ZAP 10055: las directivas sin respaldo en default-src se declaran explicitamente.
+    assert r.headers["content-security-policy"] == (
+        "default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
 
 
 def test_acknowledge_does_not_downgrade_escalated_alert(client):

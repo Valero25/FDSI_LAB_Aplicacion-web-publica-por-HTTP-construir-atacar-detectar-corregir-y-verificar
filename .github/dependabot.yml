@@ -6,3 +6,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Cadena de suministro: una version recien publicada no se propone hasta pasados 7 dias. Si una
+    # accion se compromete y publica una version maliciosa, suele detectarse y retirarse antes.
+    cooldown:
+      default-days: 7

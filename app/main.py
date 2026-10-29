@@ -205,6 +205,9 @@ def init_db() -> None:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
         for column, sql_type in NEW_COLUMNS.items():
             if column not in existing:
+                # Falso positivo de Semgrep: columna y tipo salen de la constante NEW_COLUMNS, no del
+                # cliente (SQLite no admite parametros para identificadores en ALTER TABLE).
+                # nosemgrep: python.lang.security.audit.formatted-sql-query.formatted-sql-query, python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
                 conn.execute(f"ALTER TABLE alerts ADD COLUMN {column} {sql_type}")
         conn.execute(
             """
@@ -388,7 +391,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     write_log(
         "validation_error",
         method=request.method,
-        path=request.url.path[:256],
+        path=route_path(request),
         client_ip=request.client.host if request.client else None,
         actor=actor,
         result="validation_error",
@@ -399,6 +402,16 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 
 # --- Registro de acciones (audit log) --------------------------------------------
+
+
+def route_path(request: Request) -> str:
+    """Ruta que de verdad se enruto (la del request line), acotada para el log.
+
+    No se usa request.url.path: Starlette arma request.url con la cabecera Host, que controla el
+    cliente, y en versiones < 1.3 un Host como "x/auth/refresh?" cambiaba la ruta resultante. Asi
+    un atacante falseaba la ruta del audit log y la accion login_failed/refresh_failed.
+    """
+    return request.scope["path"][:256]
 
 
 def write_log(action: str, **fields) -> None:
@@ -416,7 +429,7 @@ def log_action(
     write_log(
         action,
         method=request.method,
-        path=request.url.path[:256],  # un URL de 8 KB repetido no debe inflar el log
+        path=route_path(request),  # acotada: un URL de 8 KB repetido no debe inflar el log
         client_ip=request.client.host if request.client else None,
         alert_id=alert_id,
         actor=actor,
@@ -583,7 +596,7 @@ def _authenticate_or_reject(request: Request, scope: str):
     if scope == "login":
         # Cuerpo mal formado en login/refresh: cuenta como un intento fallido mas (mismo contador).
         _register_failure(request, "login")
-        action = "refresh_failed" if request.url.path == "/auth/refresh" else "login_failed"
+        action = "refresh_failed" if request.scope["path"] == "/auth/refresh" else "login_failed"
         log_action(request, action, result="unauthorized")
         return JSONResponse(status_code=401, content={"detail": "Invalid credentials"})
     analyst = _resolve_analyst(request)
@@ -668,6 +681,11 @@ def _reject_unsupported_media(request: Request) -> Optional[JSONResponse]:
     return JSONResponse(status_code=415, content={"detail": "Content-Type must be application/json"})
 
 
+# CSP de las respuestas de la API (JSON): nada se carga, nada se embebe, ningun formulario se envia.
+# Es la misma que pone Nginx en el server :443 (nginx/muvautomation.conf).
+API_CSP = "default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     # Nginx genera X-Request-ID ($request_id) y lo registra en access.log. Se acepta solo con la
@@ -684,7 +702,8 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    # form-action y base-uri no heredan de default-src: hay que declararlas (ZAP 10055).
+    response.headers["Content-Security-Policy"] = API_CSP
     return response
 
 

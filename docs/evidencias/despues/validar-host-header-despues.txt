@@ -1,0 +1,6 @@
+starlette 0.38.6 fastapi 0.115.0
+POST /auth/login  Host: '127.0.0.1:8000'       -> 401
+POST /auth/login  Host: 'lab/auth/refresh?'    -> 401
+actions.log:
+{"timestamp": "2026-10-28T23:59:14.513819+00:00", "action": "login_failed", "method": "POST", "path": "/auth/login", "client_ip": "...", "alert_id": null, "actor": null, "result": "unauthorized", "request_id": "a2614bd6b6c74a708405a0c7132cf734"}
+{"timestamp": "2026-10-28T23:59:14.526964+00:00", "action": "login_failed", "method": "POST", "path": "/auth/login", "client_ip": "...", "alert_id": null, "actor": null, "result": "unauthorized", "request_id": "67539aa0c615434e942b5fd370f4c05d"}

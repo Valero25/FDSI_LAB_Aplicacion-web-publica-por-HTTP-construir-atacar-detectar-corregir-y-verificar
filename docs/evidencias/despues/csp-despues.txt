@@ -1,0 +1,2 @@
+Content-Security-Policy: default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'
+Content-Security-Policy: default-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'

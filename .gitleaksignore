@@ -1,0 +1,22 @@
+# Falsos positivos de gitleaks revisados uno a uno (laboratorio FSI, docs/REPORTE_HALLAZGOS.md).
+# Ninguno es un secreto real: son claves y contrasenas FICTICIAS de las pruebas, una variable vacia
+# del ejemplo de configuracion y un curl de la documentacion. Formato: <commit>:<archivo>:<regla>:<linea>.
+# Un hallazgo nuevo (otro commit, archivo o linea) NO queda cubierto y vuelve a fallar el pipeline.
+
+# tests/test_identity.py: contrasenas de usuarios de prueba creados en una base temporal.
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:18
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:154
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:162
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:169
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:177
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:361
+143dccc36953b493fe7438922b0650bd72ed6708:tests/test_identity.py:generic-api-key:363
+# tests/test_api.py: claves de emisor y analistas de prueba ("clave-...-de-prueba").
+c6f5f63f20cc33fab2e1b659d3b76189283ec723:tests/test_api.py:generic-api-key:452
+24d095b2f05004452f0438ce947d404474961ff2:tests/test_api.py:generic-api-key:12
+24d095b2f05004452f0438ce947d404474961ff2:tests/test_api.py:generic-api-key:13
+24d095b2f05004452f0438ce947d404474961ff2:tests/test_api.py:generic-api-key:14
+# README.md: ejemplo de curl sin credencial (el -H es Content-Type).
+24d095b2f05004452f0438ce947d404474961ff2:README.md:curl-auth-header:141
+# deploy/muvautomation.env.example: ABUSEIPDB_API_KEY= vacia; la regla une la linea siguiente.
+24d095b2f05004452f0438ce947d404474961ff2:deploy/muvautomation.env.example:generic-api-key:17

@@ -1,0 +1,27 @@
+Unable to find image 'zricethezav/gitleaks:latest' locally
+latest: Pulling from zricethezav/gitleaks
+a43ab0c74cc4: Pulling fs layer
+d92b655ae8e2: Pulling fs layer
+61fdfd7c0175: Pulling fs layer
+d49a2dee86fb: Pulling fs layer
+d49a2dee86fb: Download complete
+d92b655ae8e2: Download complete
+a43ab0c74cc4: Download complete
+d49a2dee86fb: Pull complete
+cc89e3f50cd2: Download complete
+d92b655ae8e2: Pull complete
+61fdfd7c0175: Download complete
+61fdfd7c0175: Pull complete
+a43ab0c74cc4: Pull complete
+Digest: sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+Status: Downloaded newer image for zricethezav/gitleaks:latest
+
+    ○
+    │╲
+    │ ○
+    ○ ░
+    ░    gitleaks
+
+11:30PM INF 58 commits scanned.
+11:30PM INF scanned ~1068795 bytes (1.07 MB) in 22.2s
+11:30PM WRN leaks found: 13

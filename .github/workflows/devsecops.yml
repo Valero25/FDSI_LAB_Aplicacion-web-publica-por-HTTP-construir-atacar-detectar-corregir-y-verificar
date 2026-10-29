@@ -71,6 +71,9 @@ jobs:
       - run: pip install pip-audit
       - name: Vulnerabilidades conocidas en dependencias de produccion
         run: pip-audit -r app/requirements.txt --strict
+      # Las de desarrollo (pytest, httpx) corren en CI y en cada equipo: tambien se auditan.
+      - name: Vulnerabilidades conocidas en dependencias de desarrollo
+        run: pip-audit -r requirements-dev.txt --strict
 
   secretos:
     name: Busqueda de secretos (gitleaks)

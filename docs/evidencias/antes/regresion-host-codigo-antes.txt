@@ -1,0 +1,6 @@
+        # un login fallido quedaba como refresh_failed en /auth/refresh. La app usa scope["path"].
+>       assert entry["action"] == "login_failed" and entry["path"] == "/auth/login"
+E       AssertionError: assert ('refresh_failed' == 'login_failed'
+E         - login_failed
+E         + refresh_failed)
+INFO     actions:main.py:406 {"timestamp": "2026-10-28T23:45:31.443940+00:00", "action": "refresh_failed", "method": "POST", "path": "/auth/refresh", "client_ip": "testclient", "alert_id": null, "actor": null, "result": "unauthorized", "request_id": "38bb8abeb63e492388511d975156f6c1"}
