@@ -41,7 +41,7 @@
 | Control | Tipo | Dónde | Estado |
 |---|---|---|---|
 | Semgrep (`p/default`, `p/python`, `p/secrets`) con artefacto `resultado-semgrep` y puerta en ERROR | SAST | [seguridad-estatica.yml](../.github/workflows/seguridad-estatica.yml) | Nuevo |
-| gitleaks sobre el historial completo, con `.gitleaksignore` por huella | Secretos | `seguridad-estatica.yml` y `devsecops.yml` | Nuevo / existente |
+| gitleaks en CI sobre los commits de cada PR o push (el historial completo se revisa con `gitleaks git .`), con `.gitleaksignore` por huella | Secretos | `seguridad-estatica.yml` y `devsecops.yml` | Nuevo / existente |
 | Bandit (puerta en severidad alta) | SAST | [devsecops.yml](../.github/workflows/devsecops.yml) | Existente |
 | pip-audit `--strict` de producción **y de desarrollo** | SCA | `devsecops.yml` | Ampliado |
 | Dependabot (*version updates* de Actions, con `cooldown` de 7 días) | SCA | [dependabot.yml](../.github/dependabot.yml) | Ampliado |

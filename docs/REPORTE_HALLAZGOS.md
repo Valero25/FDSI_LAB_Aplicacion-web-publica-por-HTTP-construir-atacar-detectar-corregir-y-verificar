@@ -134,6 +134,18 @@ docker run --rm -d --name staging -p 127.0.0.1:8443:443 fdsi-staging
 
 En GitHub, los workflows `Seguridad estatica` (en cada PR) y `DAST staging` (manual) generan los artefactos `resultado-semgrep` e `informe-zap`.
 
+### Resultado en CI (PR #5)
+
+| Workflow / job | Resultado |
+|---|---|
+| DevSecOps: pruebas, Bandit, pip-audit (producción y desarrollo), gitleaks, scripts | ✅ los 5 jobs en verde (run `40792199803`) |
+| Seguridad estática: Semgrep | ✅ `Ran 546 rules on 63 files: 0 findings`. La puerta ERROR también da 0 |
+| Seguridad estática: gitleaks | ✅ `No leaks detected` (6 commits del PR) |
+
+El artefacto descargado está en [evidencias/ci/resultado-semgrep/semgrep.json](evidencias/ci/resultado-semgrep/semgrep.json): 0 resultados y 2 errores de parseo parcial, en `deploy/harden-host.sh` y `deploy/waf-smoke.sh`, que es una limitación del analizador de Bash. El SARIF (2 MB) no se versiona; se descarga desde Actions.
+
+**Alcance de gitleaks en CI:** en un PR, `gitleaks-action` revisa solo los commits del PR. El historial completo (64 commits, después de los cambios) se revisó con `gitleaks git .` en local: `no leaks found`.
+
 ## 6. Limitaciones
 
 - ZAP baseline es pasivo. El staging local no incluye el WAF ni fail2ban de la VM, que están cubiertos por `tests/test_waf_config.py` y `deploy/waf-smoke.sh`.
