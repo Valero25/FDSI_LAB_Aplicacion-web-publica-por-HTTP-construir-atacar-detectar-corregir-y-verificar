@@ -1,0 +1,164 @@
+Unable to find image 'ghcr.io/zaproxy/zaproxy:stable' locally
+stable: Pulling from zaproxy/zaproxy
+c52331fc4e1c: Pulling fs layer
+1b9a7c226af9: Pulling fs layer
+11422d7ca1a4: Pulling fs layer
+1e16bf51e8a9: Pulling fs layer
+1350f85d0a3a: Pulling fs layer
+2bcc7509df4a: Pulling fs layer
+eeb39cb7c161: Pulling fs layer
+77c3706d1a47: Pulling fs layer
+6a85a4ab5c39: Pulling fs layer
+bac6452d5d74: Pulling fs layer
+d630d470b0d4: Pulling fs layer
+12aea887b674: Pulling fs layer
+06ad76fb5715: Pulling fs layer
+4f4fb700ef54: Pulling fs layer
+e9cb5483cfe4: Pulling fs layer
+72b5a73c682d: Pulling fs layer
+fb3c36cc7d2a: Pulling fs layer
+f77082ef465a: Pulling fs layer
+5a68801770d3: Pulling fs layer
+4f4fb700ef54: Already exists
+1b9a7c226af9: Download complete
+c52331fc4e1c: Download complete
+12aea887b674: Download complete
+1e16bf51e8a9: Download complete
+6a85a4ab5c39: Download complete
+11422d7ca1a4: Download complete
+d630d470b0d4: Download complete
+bac6452d5d74: Download complete
+11422d7ca1a4: Pull complete
+77c3706d1a47: Download complete
+2bcc7509df4a: Download complete
+1350f85d0a3a: Download complete
+eeb39cb7c161: Download complete
+06ad76fb5715: Download complete
+1350f85d0a3a: Pull complete
+77c3706d1a47: Pull complete
+12aea887b674: Pull complete
+bac6452d5d74: Pull complete
+eeb39cb7c161: Pull complete
+4f4fb700ef54: Pull complete
+e9cb5483cfe4: Download complete
+72b5a73c682d: Download complete
+fb3c36cc7d2a: Download complete
+5a68801770d3: Download complete
+5a68801770d3: Pull complete
+f77082ef465a: Download complete
+e9cb5483cfe4: Pull complete
+72b5a73c682d: Pull complete
+d630d470b0d4: Pull complete
+2bcc7509df4a: Pull complete
+06ad76fb5715: Pull complete
+fb3c36cc7d2a: Pull complete
+1b9a7c226af9: Pull complete
+1e16bf51e8a9: Pull complete
+6a85a4ab5c39: Pull complete
+f77082ef465a: Pull complete
+c52331fc4e1c: Pull complete
+Digest: sha256:030d3df57735dacbb83464854758e674dd9ad01d79d12a129a8e58b1fd384238
+Status: Downloaded newer image for ghcr.io/zaproxy/zaproxy:stable
+Using the Automation Framework
+Total of 15 URLs
+PASS: Vulnerable JS Library (Powered by Retire.js) [10003]
+PASS: In Page Banner Information Leak [10009]
+PASS: Cookie No HttpOnly Flag [10010]
+PASS: Cookie Without Secure Flag [10011]
+PASS: Cross-Domain JavaScript Source File Inclusion [10017]
+PASS: Content-Type Header Missing [10019]
+PASS: Anti-clickjacking Header [10020]
+PASS: X-Content-Type-Options Header Missing [10021]
+PASS: Information Disclosure - Debug Error Messages [10023]
+PASS: Information Disclosure - Sensitive Information in URL [10024]
+PASS: Information Disclosure - Sensitive Information in HTTP Referrer Header [10025]
+PASS: HTTP Parameter Override [10026]
+PASS: Off-site Redirect [10028]
+PASS: Cookie Poisoning [10029]
+PASS: User Controllable Charset [10030]
+PASS: Viewstate [10032]
+PASS: Directory Browsing [10033]
+PASS: Heartbleed OpenSSL Vulnerability (Indicative) [10034]
+PASS: Strict-Transport-Security Header [10035]
+PASS: HTTP Server Response Header [10036]
+PASS: Server Leaks Information via "X-Powered-By" HTTP Response Header Field(s) [10037]
+PASS: Content Security Policy (CSP) Header Not Set [10038]
+PASS: X-Backend-Server Header Information Leak [10039]
+PASS: Secure Pages Include Mixed Content [10040]
+PASS: HTTP to HTTPS Insecure Transition in Form Post [10041]
+PASS: HTTPS to HTTP Insecure Transition in Form Post [10042]
+PASS: User Controllable JavaScript Event (XSS) [10043]
+PASS: Big Redirect Detected (Potential Sensitive Information Leak) [10044]
+PASS: Retrieved from Cache [10050]
+PASS: X-ChromeLogger-Data (XCOLD) Header Information Leak [10052]
+PASS: Cookie without SameSite Attribute [10054]
+PASS: X-Debug-Token Information Leak [10056]
+PASS: Username Hash Found [10057]
+PASS: X-AspNet-Version Response Header [10061]
+PASS: PII Disclosure [10062]
+PASS: Permissions Policy Header Not Set [10063]
+PASS: Timestamp Disclosure [10096]
+PASS: Hash Disclosure [10097]
+PASS: Cross-Domain Misconfiguration [10098]
+PASS: Source Code Disclosure [10099]
+PASS: Weak Authentication Method [10105]
+PASS: Reverse Tabnabbing [10108]
+PASS: Dangerous JS Functions [10110]
+PASS: Session Management Response Identified [10112]
+PASS: Verification Request Identified [10113]
+PASS: Script Served From Malicious Domain (polyfill) [10115]
+PASS: ZAP is Out of Date [10116]
+PASS: Private IP Disclosure [2]
+PASS: Server Side Technology Version with Known Vulnerabilities [20020]
+PASS: Session ID in URL Rewrite [3]
+PASS: Script Passive Scan Rules [50001]
+PASS: Stats Passive Scan Rule [50003]
+PASS: Insecure JSF ViewState [90001]
+PASS: Java Serialization Object [90002]
+PASS: Sub Resource Integrity Attribute Missing [90003]
+PASS: Insufficient Site Isolation Against Spectre Vulnerability [90004]
+PASS: Charset Mismatch [90011]
+PASS: Application Error Disclosure [90022]
+PASS: WSDL File Detection [90030]
+PASS: Loosely Scoped Cookie [90033]
+WARN-NEW: Re-examine Cache-control Directives [10015] x 5 
+	https://staging/ (200 OK)
+	https://staging/app/ (200 OK)
+	https://staging/app/?note (200 OK)
+	https://staging/app/?severity=critical&status=new (200 OK)
+	https://staging/app/?type=firewall (200 OK)
+WARN-NEW: Information Disclosure - Suspicious Comments [10027] x 1 
+	https://staging/app/app.js (200 OK)
+WARN-NEW: User Controllable HTML Element Attribute (Potential XSS) [10031] x 12 
+	https://staging/app/?note&severity=critical&status=new (200 OK)
+	https://staging/app/?note&severity=critical&status=new (200 OK)
+	https://staging/app/?note&severity=critical&status=new&type=firewall (200 OK)
+	https://staging/app/?note&severity=critical&status=new&type=firewall (200 OK)
+	https://staging/app/?note&severity=critical&status=new&type=firewall (200 OK)
+WARN-NEW: Non-Storable Content [10049] x 9 
+	https://staging/ (302 Found)
+	https://staging/app (301 Moved Permanently)
+	https://staging/robots.txt (404 Not Found)
+	https://staging/sitemap.xml (404 Not Found)
+	https://staging/app/ (403 Forbidden)
+WARN-NEW: CSP: Failure to Define Directive with No Fallback [10055] x 1 
+	https://staging/app (301 Moved Permanently)
+WARN-NEW: Modern Web Application [10109] x 5 
+	https://staging/ (200 OK)
+	https://staging/app/ (200 OK)
+	https://staging/app/?note (200 OK)
+	https://staging/app/?severity=critical&status=new (200 OK)
+	https://staging/app/?type=firewall (200 OK)
+WARN-NEW: Authentication Request Identified [10111] x 8 
+	https://staging/app/ (403 Forbidden)
+	https://staging/app/?note (403 Forbidden)
+	https://staging/app/?note&severity=critical&status=new (403 Forbidden)
+	https://staging/app/?note&severity=critical&status=new&type=firewall (403 Forbidden)
+	https://staging/app/?note&type=firewall (403 Forbidden)
+WARN-NEW: Absence of Anti-CSRF Tokens [10202] x 5 
+	https://staging/ (200 OK)
+	https://staging/app/ (200 OK)
+	https://staging/app/?note (200 OK)
+	https://staging/app/?severity=critical&status=new (200 OK)
+	https://staging/app/?type=firewall (200 OK)
+FAIL-NEW: 0	FAIL-INPROG: 0	WARN-NEW: 8	WARN-INPROG: 0	INFO: 0	IGNORE: 0	PASS: 60

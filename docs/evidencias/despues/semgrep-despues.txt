@@ -1,0 +1,40 @@
+               
+               
+┌─────────────┐
+│ Scan Status │
+└─────────────┘
+  Scanning 63 files tracked by git with 1107 Code rules:
+                                                                                                                        
+  Language      Rules   Files          Origin      Rules                                                                
+ ─────────────────────────────        ───────────────────                                                               
+  <multilang>      73      46          Community    1107                                                                
+  python          273       9                                                                                           
+  bash              4       5                                                                                           
+  yaml             37       4                                                                                           
+  js              153       3                                                                                           
+  json              4       2                                                                                           
+  dockerfile        6       1                                                                                           
+  html              1       1                                                                                           
+                                                                                                                        
+                
+                
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+✅ Scan completed successfully.
+ • Findings: 0 (0 blocking)
+ • Rules run: 546
+ • Targets scanned: 63
+ • Parsed lines: ~99.8%
+ • Scan skipped: 
+   ◦ Matching --exclude patterns: 33
+   ◦ Files matching .semgrepignore patterns: 8
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
+Ran 546 rules on 63 files: 0 findings.
+(need more rules? `semgrep login` for additional free Semgrep Registry rules)
+
+
+A new version of Semgrep is available. See https://semgrep.dev/docs/upgrading
+If Semgrep missed a finding, please send us feedback to let us know!
+See https://semgrep.dev/docs/reporting-false-negatives/

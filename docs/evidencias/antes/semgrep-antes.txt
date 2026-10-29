@@ -1,0 +1,86 @@
+Unable to find image 'semgrep/semgrep:latest' locally
+latest: Pulling from semgrep/semgrep
+5d35e74d7c68: Pulling fs layer
+5e9b4a97f639: Pulling fs layer
+5e76960310b5: Pulling fs layer
+e27848103812: Pulling fs layer
+e884d1f7bde9: Pulling fs layer
+f2fcae456309: Pulling fs layer
+248709850098: Pulling fs layer
+bd9ddc54bea9: Pulling fs layer
+db43e654f745: Pulling fs layer
+c2bad043d386: Pulling fs layer
+d00fa809875c: Pulling fs layer
+df7030e308c5: Pulling fs layer
+850766837198: Pulling fs layer
+608b4d261b6e: Pulling fs layer
+cd5d0e806f47: Pulling fs layer
+5d35e74d7c68: Download complete
+5e76960310b5: Download complete
+5e9b4a97f639: Download complete
+df7030e308c5: Download complete
+db43e654f745: Download complete
+bd9ddc54bea9: Download complete
+c2bad043d386: Download complete
+248709850098: Download complete
+f2fcae456309: Download complete
+e27848103812: Download complete
+cd5d0e806f47: Download complete
+608b4d261b6e: Download complete
+850766837198: Download complete
+5e9b4a97f639: Pull complete
+e27848103812: Pull complete
+bd9ddc54bea9: Pull complete
+248709850098: Pull complete
+f2fcae456309: Pull complete
+db43e654f745: Pull complete
+4eeb491ca76f: Download complete
+d00fa809875c: Download complete
+e884d1f7bde9: Download complete
+e884d1f7bde9: Pull complete
+d00fa809875c: Pull complete
+5e76960310b5: Pull complete
+c2bad043d386: Pull complete
+cd5d0e806f47: Pull complete
+850766837198: Pull complete
+5d35e74d7c68: Pull complete
+df7030e308c5: Pull complete
+608b4d261b6e: Pull complete
+Digest: sha256:3db5c7af55eb1f512eac0abf0ab69a97b52c74b5e9a27314c221aee1a78d7ab2
+Status: Downloaded newer image for semgrep/semgrep:latest
+               
+               
+┌─────────────┐
+│ Scan Status │
+└─────────────┘
+  Scanning 59 files tracked by git with 1107 Code rules:
+                                                                                                                        
+  Language      Rules   Files          Origin      Rules                                                                
+ ─────────────────────────────        ───────────────────                                                               
+  <multilang>      73      43          Community    1107                                                                
+  python          273       9                                                                                           
+  bash              4       4                                                                                           
+  js              153       3                                                                                           
+  yaml             37       2                                                                                           
+  json              4       2                                                                                           
+  dockerfile        6       1                                                                                           
+  html              1       1                                                                                           
+                                                                                                                        
+                
+                
+┌──────────────┐
+│ Scan Summary │
+└──────────────┘
+✅ Scan completed successfully.
+ • Findings: 7 (7 blocking)
+ • Rules run: 546
+ • Targets scanned: 59
+ • Parsed lines: ~99.8%
+ • Scan skipped: 
+   ◦ Matching --exclude patterns: 13
+   ◦ Files matching .semgrepignore patterns: 8
+ • Scan was limited to files tracked by git
+ • For a detailed list of skipped files and lines, run semgrep with the --verbose flag
+Ran 546 rules on 59 files: 7 findings.
+
+A new version of Semgrep is available. See https://semgrep.dev/docs/upgrading

@@ -1,0 +1,12 @@
+## pytest
+270 passed, 1 warning in 38.36s
+## bandit
+	Total issues (by severity):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 0
+## pip-audit produccion
+No known vulnerabilities found
+## pip-audit desarrollo
+No known vulnerabilities found
