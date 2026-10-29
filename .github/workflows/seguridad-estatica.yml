@@ -1,0 +1,69 @@
+# Laboratorio FSI, paso 3: SAST (Semgrep) y deteccion de secretos (gitleaks) en cada PR.
+# Complementa a devsecops.yml (Bandit, pip-audit, pruebas): Semgrep cubre Python, HTML, Dockerfile,
+# YAML de GitHub y Dependabot con reglas de la comunidad. El informe se publica como artefacto
+# "resultado-semgrep" (JSON + SARIF). Acciones fijadas por SHA de commit; imagen por digest.
+name: Seguridad estatica
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, security/lab-fsi]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seguridad-estatica-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      # semgrep/semgrep 1.181.1
+      image: semgrep/semgrep@sha256:3db5c7af55eb1f512eac0abf0ab69a97b52c74b5e9a27314c221aee1a78d7ab2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Informe completo (todas las severidades) para el artefacto; no corta el job.
+      - name: Analisis completo
+        run: |
+          semgrep scan --config p/default --config p/python --config p/secrets --metrics=off \
+            --exclude docs --exclude evidencias \
+            --json --output semgrep.json --sarif-output semgrep.sarif || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: resultado-semgrep
+          path: |
+            semgrep.json
+            semgrep.sarif
+          retention-days: 30
+      # Puerta: un hallazgo ERROR (alta) nuevo falla el pipeline. Los falsos positivos revisados
+      # llevan "nosemgrep: <regla>" con su justificacion en el codigo.
+      - name: Puerta de severidad alta
+        run: |
+          semgrep scan --config p/default --config p/python --config p/secrets --metrics=off \
+            --exclude docs --exclude evidencias --severity ERROR --error
+
+  secretos:
+    name: Secretos (gitleaks, historial completo)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read   # gitleaks-action lista los commits del PR (403 sin este permiso)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Los falsos positivos revisados estan en .gitleaksignore (por huella exacta).
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
