@@ -8,7 +8,7 @@
 | Rama base | `main` |
 | Commit de línea base | `44ddc48` (`main` al iniciar el laboratorio, ya con las actualizaciones de Dependabot fusionadas) |
 | Rama del laboratorio | `security/lab-fsi` |
-| Responsables | Valero25 (Juan Valero). *Agregar aquí al resto del equipo.* |
+| Responsables | Ana Gabriela Fiquitiva Poveda y Juan David Valero Abril (Valero25) |
 | Tecnología | Python 3.12, FastAPI 0.142.2 / Starlette 1.10, Uvicorn, SQLite, PyJWT (Ed25519), Argon2, pyotp (TOTP). Frontend HTML/CSS/JS sin dependencias. Nginx 1.26 (TLS, cabeceras, *rate limit*), ModSecurity v3 + OWASP CRS, fail2ban, systemd. Ubuntu 26.04 en una VM de VMware. |
 | Entorno de staging | VM `lab3-server`, `https://192.168.61.129`, en una red NAT privada (`192.168.61.0/24`). Para el DAST se usó un **staging local equivalente en Docker** ([deploy/staging-local](../deploy/staging-local/Dockerfile)): Nginx con la misma configuración del repo, más la API, HTTPS autofirmado y claves y datos ficticios generados al arrancar. |
 
