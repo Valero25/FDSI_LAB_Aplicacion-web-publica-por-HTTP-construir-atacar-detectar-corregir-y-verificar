@@ -47,7 +47,8 @@
 | Dependabot (*version updates* de Actions, con `cooldown` de 7 días) | SCA | [dependabot.yml](../.github/dependabot.yml) | Ampliado |
 | OWASP ZAP baseline (pasivo), con artefacto `informe-zap` | DAST | [dast-staging.yml](../.github/workflows/dast-staging.yml) | Nuevo |
 | pytest (270 pruebas, con regresiones de este laboratorio) | Regresión | `devsecops.yml` | Ampliado |
-| Dependabot alerts, CodeQL *default setup*, secret scanning | Nativos de GitHub | Settings → Advanced Security | **Pendiente de activar** (ver §4) |
+| Dependency graph, **Dependabot alerts**, **Dependabot security updates**, Malware alerts | Nativos de GitHub (SCA) | Settings → Advanced Security | ✅ **Activos** (2026-11-04). Dependabot alerts: 0 alertas abiertas. La API confirma `automated-security-fixes: enabled` |
+| CodeQL *default setup*, secret scanning | Nativos de GitHub (SAST / secretos) | Settings → Advanced Security | ❌ **No disponibles** en este plan (ver §4) |
 
 ## 3. Política de reporte
 
@@ -55,7 +56,12 @@ Las vulnerabilidades se reportan en privado al responsable del repositorio, nunc
 
 ## 4. Limitaciones
 
-- **Controles nativos de GitHub:** el repositorio es **privado** y de una cuenta personal. En el inicio del laboratorio, la API de GitHub respondía *"Dependabot alerts are disabled"*, *"Code scanning is not enabled"* y *"Secret scanning is disabled"*. Las Dependabot alerts son gratuitas y se pueden activar. CodeQL y secret scanning en repos privados requieren GitHub Advanced Security (Code Security / Secret Protection). Si el plan no lo incluye, se documenta como limitación y Semgrep y gitleaks cubren esa función.
+- **Controles nativos de GitHub:** el repositorio es **privado** y de una cuenta personal.
+  - Al inicio del laboratorio, la API respondía *"Dependabot alerts are disabled"*, *"Code scanning is not enabled"* y *"Secret scanning is disabled"*.
+  - El 2026-11-04 se activaron Dependabot alerts, Malware alerts y Dependabot security updates.
+  - En *Settings → Advanced Security* **no aparecen** las secciones de Code scanning (CodeQL) ni de Secret Protection: en repositorios privados requieren GitHub Advanced Security, que el plan no incluye. La API sigue respondiendo *"Code scanning is not enabled"* y *"Secret scanning is disabled"*.
+  - **Compensación:** Semgrep cumple el papel de CodeQL (SAST, en `seguridad-estatica.yml`) y gitleaks el de secret scanning (en los dos workflows). Ambos corren en cada PR y bloquean el merge si fallan.
+- **Dependency graph y evidencias:** Dependabot trata como manifiesto de pip cualquier `*requirements*.txt`. Una evidencia llamada `pip-audit-requirements-antes.txt` hizo fallar el job *Dependency Graph*. Se renombró a `pip-audit-produccion-antes.txt`.
 - **DAST:** GitHub Actions no alcanza la VM, que está en una NAT privada. Por eso `dast-staging.yml` levanta el staging local dentro del runner cuando no existe la variable `STAGING_URL`. El staging local no incluye el WAF ni fail2ban.
 - **ZAP baseline es pasivo:** no prueba inyección ni control de acceso. Lo que no cubre lo validan las pruebas automatizadas (`tests/`) y la validación manual (H-3).
 - **Semgrep** analiza parcialmente `deploy/harden-host.sh` y `deploy/waf-smoke.sh` (*PartialParsing* del analizador de Bash). ShellCheck ya cubre esos scripts.
