@@ -44,11 +44,13 @@
 | gitleaks en CI sobre los commits de cada PR o push (el historial completo se revisa con `gitleaks git .`), con `.gitleaksignore` por huella | Secretos | `seguridad-estatica.yml` y `devsecops.yml` | Nuevo / existente |
 | Bandit (puerta en severidad alta) | SAST | [devsecops.yml](../.github/workflows/devsecops.yml) | Existente |
 | pip-audit `--strict` de producción **y de desarrollo** | SCA | `devsecops.yml` | Ampliado |
-| Dependabot (*version updates* de Actions, con `cooldown` de 7 días) | SCA | [dependabot.yml](../.github/dependabot.yml) | Ampliado |
+| Dependabot (*version updates* de Actions **y de pip**: `app/requirements.txt` y `requirements-dev.txt`, con `cooldown` de 7 días) | SCA | [dependabot.yml](../.github/dependabot.yml) | Ampliado (PR de cierre) |
+| Dependency Review en cada PR (falla si el PR agrega una dependencia con vulnerabilidad moderada o mayor) | SCA | job `revision-dependencias` de `seguridad-estatica.yml` | Nuevo (PR de cierre) |
 | OWASP ZAP baseline (pasivo), con artefacto `informe-zap` | DAST | [dast-staging.yml](../.github/workflows/dast-staging.yml) | Nuevo |
 | pytest (270 pruebas, con regresiones de este laboratorio) | Regresión | `devsecops.yml` | Ampliado |
 | Dependency graph, **Dependabot alerts**, **Dependabot security updates**, Malware alerts | Nativos de GitHub (SCA) | Settings → Advanced Security | ✅ **Activos** (2026-11-04). Dependabot alerts: 0 alertas abiertas. La API confirma `automated-security-fixes: enabled` |
-| CodeQL *default setup*, secret scanning | Nativos de GitHub (SAST / secretos) | Settings → Advanced Security | ❌ **No disponibles** en este plan (ver §4) |
+| **CodeQL *default setup*** (suite `extended`; Python, JavaScript/TypeScript y GitHub Actions) | Nativo de GitHub (SAST) | Settings → Advanced Security → Code scanning | ✅ **Activo** (2026-11-10, al pasar el repo a público). Primer análisis: run `42888933539`, 3 alertas (H-7, F-5, F-6) |
+| **Secret scanning** y **push protection** | Nativo de GitHub (secretos) | Settings → Advanced Security → Secret Protection | ✅ **Activos** (2026-11-10). 0 alertas sobre todo el historial |
 
 ## 3. Política de reporte
 
@@ -56,11 +58,11 @@ Las vulnerabilidades se reportan en privado al responsable del repositorio, nunc
 
 ## 4. Limitaciones
 
-- **Controles nativos de GitHub:** el repositorio es **privado** y de una cuenta personal.
+- **Controles nativos de GitHub (historia):** el repositorio era **privado** y de una cuenta personal.
   - Al inicio del laboratorio, la API respondía *"Dependabot alerts are disabled"*, *"Code scanning is not enabled"* y *"Secret scanning is disabled"*.
-  - El 2026-11-04 se activaron Dependabot alerts, Malware alerts y Dependabot security updates.
-  - En *Settings → Advanced Security* **no aparecen** las secciones de Code scanning (CodeQL) ni de Secret Protection: en repositorios privados requieren GitHub Advanced Security, que el plan no incluye. La API sigue respondiendo *"Code scanning is not enabled"* y *"Secret scanning is disabled"*.
-  - **Compensación:** Semgrep cumple el papel de CodeQL (SAST, en `seguridad-estatica.yml`) y gitleaks el de secret scanning (en los dos workflows). Ambos corren en cada PR y bloquean el merge si fallan.
+  - El 2026-11-04 se activaron Dependabot alerts, Malware alerts y Dependabot security updates. CodeQL y secret scanning no aparecían: en repositorios privados requieren GitHub Advanced Security.
+  - **El 2026-11-10 el repositorio pasó a público** para poder usar CodeQL, secret scanning y Dependency Review sin licencia. Antes se comprobó que no se publicaba nada sensible: gitleaks sobre todo el historial (`no leaks found`), ninguna rama con commits fuera de `main` salvo los 3 de Dependabot (solo versiones de acciones), sin archivos `.env`, `.pem` ni bases de datos, y solo claves de prueba ficticias.
+  - Semgrep y gitleaks se mantienen: CodeQL encontró cosas que Semgrep no vio (H-7) y viceversa (H-5), así que se complementan.
 - **Dependency graph y evidencias:** Dependabot trata como manifiesto de pip cualquier `*requirements*.txt`. Una evidencia llamada `pip-audit-requirements-antes.txt` hizo fallar el job *Dependency Graph*. Se renombró a `pip-audit-produccion-antes.txt`.
 - **DAST:** GitHub Actions no alcanza la VM, que está en una NAT privada. Por eso `dast-staging.yml` levanta el staging local dentro del runner cuando no existe la variable `STAGING_URL`. El staging local no incluye el WAF ni fail2ban.
 - **ZAP baseline es pasivo:** no prueba inyección ni control de acceso. Lo que no cubre lo validan las pruebas automatizadas (`tests/`) y la validación manual (H-3).
