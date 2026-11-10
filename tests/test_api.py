@@ -631,6 +631,19 @@ def _audit_actions():
     return [json.loads(l) for l in lines]
 
 
+def test_audit_log_cannot_be_forged_with_newlines_from_the_client(client):
+    # Regresion (CodeQL #3, py/log-injection): la ruta y el id de alerta vienen del cliente y llegan
+    # al audit log. write_log serializa con json.dumps, que escapa \n y \r: un salto de linea no
+    # puede crear una entrada nueva que engane a scripts/detect.py o a fail2ban.
+    forged = '{"action":"login_ok","actor":"login:admin"}'
+    before = len(_audit_actions())
+    client.get("/alerts/x%0A%0D" + forged.replace('"', "%22"), headers=ANA)
+    new = _audit_actions()[before:]  # json.loads de cada linea: una linea forjada se veria aqui
+    assert new, "la peticion debia quedar registrada"
+    assert all(e["action"] != "login_ok" for e in new)
+    assert any(e.get("path", "").startswith("/alerts/x\n\r{") for e in new)  # el payload quedo dentro del campo
+
+
 def test_broken_json_without_key_is_401_not_422(client):
     before = [e["action"] for e in _audit_actions()].count("validation_error")  # el log es compartido
     r = client.post("/alerts", content=BROKEN["content"], headers=BROKEN["headers"])
