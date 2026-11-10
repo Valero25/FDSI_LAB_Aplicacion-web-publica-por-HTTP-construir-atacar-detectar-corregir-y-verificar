@@ -2,6 +2,12 @@
 
 Secure Product Challenge — MuvAutomation | Automatización de incidentes de CrowdStrike Falcon
 
+[![DevSecOps](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/workflows/devsecops.yml/badge.svg)](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/workflows/devsecops.yml)
+[![Seguridad estatica](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/workflows/seguridad-estatica.yml/badge.svg)](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/workflows/seguridad-estatica.yml)
+[![DAST staging](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/workflows/dast-staging.yml/badge.svg)](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/workflows/dast-staging.yml)
+
+**Seguridad en el ciclo de desarrollo (Lab 05):** [Informe de seguridad](docs/SECURITY.md) · [Reporte de hallazgos](docs/REPORTE_HALLAZGOS.md) · [Checklist de PR](docs/CHECKLIST_PR.md)
+
 ## Equipo
 
 - Ana Gabriela Fiquitiva Poveda
