@@ -178,6 +178,22 @@ Al pasar el repositorio a público se activó CodeQL *default setup* con la suit
 
 **Lección:** CodeQL sigue el flujo de datos entre funciones y encontró algo que Semgrep (patrones) y Bandit no marcaron. Al revés, Semgrep detectó la configuración de Dependabot (H-5), que CodeQL no revisa. Usar los dos se justifica.
 
+### Nueva ejecución después del PR #6
+
+- **CodeQL:** al fusionar el PR #6 (`424ac63`), el análisis de `main` marcó la alerta #1 como **fixed** (2026-11-10 20:00 UTC). Las #2 y #3 se descartan en GitHub con la justificación de F-6 y F-5.
+- **DAST:** run `42891157649` de `DAST staging` sobre `main`: igual que antes, la única alerta media es la 10202 (F-3) y la 10055 no reaparece. Informe en [evidencias/ci/informe-zap-final](evidencias/ci/informe-zap-final/informe-zap.html).
+
+## 7.1 Dependabot pip: primeras propuestas y decisión (SCA)
+
+Al activar Dependabot para pip se abrieron 5 PRs de *version updates*. Ninguno es de seguridad: Dependabot alerts sigue en 0 y pip-audit no reporta CVE en las versiones actuales.
+
+| PR | Cambio | Decisión |
+|---|---|---|
+| #7, #8 | fastapi y uvicorn **desde la raíz** | **Duplicados (H-8).** `requirements-dev.txt` incluye `-r app/requirements.txt`, así que la entrada `/` de Dependabot volvía a proponer las dependencias de producción. Se corrige con `allow` (solo `pytest` y `httpx` en la raíz) y se cierran |
+| #9 | pytest 9.0.3 → 9.2.0 (desarrollo) | Solo afecta a las pruebas y la CI está en verde. Se puede fusionar |
+| #10 | uvicorn 0.40.0 → 0.54.0 (`/app`) | No corrige ninguna vulnerabilidad y es un salto de 14 versiones menores del servidor ASGI. La CI está en verde, pero antes de fusionarlo hay que probarlo en el staging local (`--no-server-header` y los *proxy headers* detrás de Nginx). **No se actualiza a ciegas** |
+| #11 | fastapi 0.142.2 → 0.162.0 (`/app`) | Igual criterio: arrastra otra versión de Starlette, de la que depende la corrección H-3. Se revisa el changelog, se vuelven a correr `validar-host-header.sh` y ZAP, y recién entonces se fusiona |
+
 ## 8. Arquitectura del pipeline
 
 ```
