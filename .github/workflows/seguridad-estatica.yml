@@ -69,3 +69,19 @@ jobs:
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  revision-dependencias:
+    # SCA en el PR: compara el grafo de dependencias de la rama con el de main y falla si el PR
+    # introduce un paquete con una vulnerabilidad conocida de severidad moderada o mayor.
+    # Requiere dependency graph (gratis en repos publicos).
+    if: github.event_name == 'pull_request'
+    name: SCA (Dependency Review)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
