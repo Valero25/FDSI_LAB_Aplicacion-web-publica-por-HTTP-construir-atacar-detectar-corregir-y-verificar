@@ -45,7 +45,7 @@ El laboratorio se hizo en dos partes. La idea es **comparar** la versión inicia
 | Validación de entrada | `severity` libre, sin longitudes | `Literal`, `max_length`, `pattern`, IP validada, `extra="forbid"` → 422 | G9 |
 | `POST /alerts` | Abierto a cualquiera | Exige `X-API-Key` (401 sin ella) y registra los intentos fallidos | G10 |
 | Servicio systemd | `User=www-data` sin restricciones | `NoNewPrivileges`, `ProtectSystem=strict`, solo escribe la DB y los logs | G11 |
-| Permisos y repositorio | `.git`/`.venv` en `rwxrwxr-x`; repositorio público | Sin acceso para "otros", DB y logs en 640, `/.git` bloqueado y repositorio privado | G12 |
+| Permisos y repositorio | `.git`/`.venv` en `rwxrwxr-x`; repositorio público | Sin acceso para "otros", DB y logs en 640, `/.git` bloqueado y repositorio privado. *En el Lab 05 el repositorio volvió a ser público, como decisión de riesgo justificada, para habilitar CodeQL y secret scanning ([SECURITY.md §5](docs/SECURITY.md#5-decisión-de-riesgo-repositorio-público-revisión-de-g12))* | G12 |
 | Clasificación y escalamiento | Solo en el diseño; toda alerta queda en `new` | **Motor de Clasificación**: MITRE ATT&CK local + AbuseIPDB → `risk_score` 0–100. **Motor de Escalamiento**: escala solo si el score es ≥ 70 | G13 |
 | Integraciones externas | Ninguna | Solo AbuseIPDB, con controles (IPs públicas, timeout, validación, caché, cuota, segundo plano) | G14 |
 | Salida a Internet | `allow outgoing` | `deny outgoing` salvo 53, 123/udp, 80, 443 y 4460/tcp (NTS) solo hacia los rangos de Canonical | G15 |
