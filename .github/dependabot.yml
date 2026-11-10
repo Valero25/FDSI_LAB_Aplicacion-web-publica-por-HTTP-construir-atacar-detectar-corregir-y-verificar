@@ -21,7 +21,9 @@ updates:
       default-days: 7
     open-pull-requests-limit: 5
 
-  # Dependencias de desarrollo y CI (requirements-dev.txt en la raiz).
+  # Dependencias de desarrollo y CI (requirements-dev.txt en la raiz). Ese archivo incluye
+  # "-r app/requirements.txt", asi que sin "allow" Dependabot proponia otra vez fastapi y uvicorn
+  # (PRs duplicados #7 y #8). Aqui solo se vigilan las dependencias propias de desarrollo.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -29,3 +31,6 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
+    allow:
+      - dependency-name: pytest
+      - dependency-name: httpx
