@@ -50,6 +50,7 @@
 | pytest (270 pruebas, con regresiones de este laboratorio) | Regresión | `devsecops.yml` | Ampliado |
 | Dependency graph, **Dependabot alerts**, **Dependabot security updates**, Malware alerts | Nativos de GitHub (SCA) | Settings → Advanced Security | ✅ **Activos** (2026-11-04). Dependabot alerts: 0 alertas abiertas. La API confirma `automated-security-fixes: enabled` |
 | **CodeQL *default setup*** (suite `extended`; Python, JavaScript/TypeScript y GitHub Actions) | Nativo de GitHub (SAST) | Settings → Advanced Security → Code scanning | ✅ **Activo** (2026-11-10, al pasar el repo a público). Primer análisis: run `42888933539`, 3 alertas (H-7, F-5, F-6) |
+| **Ruleset `proteger-main`**: sin borrado ni *force push*, PR obligatorio, 7 checks obligatorios y actualizados (Semgrep, gitleaks, Dependency Review, pytest, Bandit, pip-audit, CodeQL) y resultados de CodeQL sin alertas *high* ni *error*. Sin excepciones (*bypass list* vacía) | Gobierno del pipeline | Settings → Rules → Rulesets ([evidencia](evidencias/ci/ruleset-proteger-main.json)) | ✅ **Activo** (2026-11-10). Convierte los escaneos de informativos en una **puerta de merge** |
 | **Secret scanning** y **push protection** | Nativo de GitHub (secretos) | Settings → Advanced Security → Secret Protection | ✅ **Activos** (2026-11-10). 0 alertas sobre todo el historial |
 
 ## 3. Política de reporte
