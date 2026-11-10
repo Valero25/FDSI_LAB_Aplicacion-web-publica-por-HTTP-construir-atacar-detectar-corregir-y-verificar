@@ -215,13 +215,16 @@ Manual (workflow_dispatch)
 
 Nativos de GitHub: Dependabot alerts + security updates, Dependabot version updates
 (Actions y pip, cooldown de 7 días), secret scanning + push protection.
+
+Puerta de merge: ruleset "proteger-main" → PR obligatorio + los 7 checks en verde
++ CodeQL sin alertas high/error; sin force push, sin borrado y sin excepciones.
 ```
 
 Todas las acciones de terceros se fijan por SHA de commit y las imágenes por *digest*; los workflows tienen `permissions: contents: read` y solo el job de gitleaks agrega `pull-requests: read`.
 
 ## 9. Conclusiones y aprendizajes
 
-- **Un check verde no significa una aplicación segura.** Los informes de Semgrep y ZAP no bloquean (`|| true`) y la puerta solo corta en severidad alta. La seguridad la demuestra el ciclo completo de cada hallazgo: detectarlo, entenderlo, corregirlo y volver a ejecutar la herramienta (H-1 a H-7).
+- **Un check verde no significa una aplicación segura.** Los informes de Semgrep y ZAP no bloquean (`|| true`) y la puerta solo corta en severidad alta. Al final, el ruleset `proteger-main` convirtió esas puertas en obligatorias: un PR que introduzca un secreto, una dependencia vulnerable o una alerta alta de CodeQL ya no se puede fusionar. La seguridad la demuestra el ciclo completo de cada hallazgo: detectarlo, entenderlo, corregirlo y volver a ejecutar la herramienta (H-1 a H-7).
 - **Cada herramienta ve una capa distinta.** SAST encontró configuración y código (H-5, H-7), SCA encontró dependencias (H-2, H-6), DAST encontró cabeceras HTTP (H-4), y el hallazgo con más impacto (H-3, integridad del audit log) salió de unir un CVE de SCA con una validación manual. Ninguna herramienta lo habría encontrado sola.
 - **La mitad de los resultados fueron falsas alarmas** (F-1 a F-6). Clasificarlas con una justificación verificable (una prueba, una huella en `.gitleaksignore`, un `nosemgrep` comentado) vale tanto como corregir, y evita apagar el escáner.
 - **Que una dependencia sea vulnerable no implica que el código sea explotable.** De los 35 CVE de H-2 solo uno era alcanzable desde el código, y se corrigió en la aplicación (`scope["path"]`), de modo que la defensa no depende de la versión de Starlette.
