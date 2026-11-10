@@ -75,7 +75,9 @@ def test_html_has_no_inline_js_css_or_handlers(path):
     assert not re.search(r"\son[a-z]+\s*=", html, re.I), "manejador on*"
     assert not re.search(r"javascript\s*:", html, re.I)
     assert not re.search(r"<\s*base\b", html, re.I)
-    scripts = re.findall(r"<script\b([^>]*)>(.*?)</script>", html, re.I | re.S)
+    # El cierre admite espacios y atributos (</script >, </script foo>), que el navegador acepta;
+    # con "</script>" literal un script en linea cerrado asi escapaba a la comprobacion (CodeQL #1).
+    scripts = re.findall(r"<script\b([^>]*)>(.*?)</script\b[^>]*>", html, re.I | re.S)
     assert scripts, "sin script"
     for attrs, body in scripts:
         assert body.strip() == "", "script en linea"

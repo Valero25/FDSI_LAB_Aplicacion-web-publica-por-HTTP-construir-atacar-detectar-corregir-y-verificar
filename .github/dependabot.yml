@@ -10,3 +10,22 @@ updates:
     # accion se compromete y publica una version maliciosa, suele detectarse y retirarse antes.
     cooldown:
       default-days: 7
+
+  # SCA de Python: dependencias de produccion (app/requirements.txt). Las alertas de seguridad
+  # (Dependabot alerts / security updates) no esperan al cooldown; solo las actualizaciones de version.
+  - package-ecosystem: pip
+    directory: /app
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+
+  # Dependencias de desarrollo y CI (requirements-dev.txt en la raiz).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5

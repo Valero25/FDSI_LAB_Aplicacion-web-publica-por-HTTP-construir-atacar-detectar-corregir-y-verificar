@@ -1,7 +1,7 @@
 # Reporte de hallazgos — Laboratorio FSI
 
-- **Repositorio:** `Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar` (privado)
-- **Línea base:** `main` en `44ddc48`. **Rama de remediación:** `security/lab-fsi`
+- **Repositorio:** `Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar` (público desde el 2026-11-10; antes privado, ver [SECURITY.md §4](SECURITY.md#4-limitaciones))
+- **Línea base:** `main` en `44ddc48`. **Ramas de remediación:** `security/lab-fsi` (PR #5) y `security/lab-fsi-cierre` (PR de cierre: CodeQL, Dependency Review y Dependabot pip)
 - **Entorno de prueba:** staging HTTPS local en Docker ([deploy/staging-local](../deploy/staging-local/Dockerfile)): Nginx con la configuración del repo, más la API, con claves y datos ficticios. Todo el análisis dinámico fue pasivo o con peticiones inocuas.
 - **Evidencias:** [evidencias/antes](evidencias/antes/) y [evidencias/despues](evidencias/despues/), con las salidas originales de cada herramienta (JSON, HTML y texto).
 
@@ -10,12 +10,13 @@
 | Herramienta (tipo) | Antes | Después | Evidencia antes → después |
 |---|---|---|---|
 | **Semgrep** (SAST) | 7 hallazgos: **3 ERROR**, **1 MEDIUM**, 3 WARNING | **0 hallazgos**. La puerta `--severity ERROR --error` termina con código 0 | [semgrep-antes.json](evidencias/antes/semgrep-antes.json) → [semgrep-despues.json](evidencias/despues/semgrep-despues.json) |
+| **CodeQL** *default setup* (SAST, suite `extended`, v2.27.4) | **3 alertas** en Python: 2 *high* (`py/bad-tag-filter`, `py/clear-text-logging-sensitive-data`) y 1 *medium* (`py/log-injection`). 0 en JavaScript y en Actions | 1 corregida (H-7), 1 falsa alarma con prueba de regresión (F-5) y 1 riesgo aceptado (F-6) | [codeql-alertas-antes.json](evidencias/ci/codeql/codeql-alertas-antes.json) · [análisis](evidencias/ci/codeql/codeql-analisis-antes.json) |
 | **Bandit** (SAST) | 0 altas, 0 medias (2 `nosec` justificados) | 0 altas, 0 medias | [bandit-antes.txt](evidencias/antes/bandit-antes.txt) → [pytest-bandit-pipaudit-despues.txt](evidencias/despues/pytest-bandit-pipaudit-despues.txt) |
 | **gitleaks** (secretos, historial completo de 58 commits) | **13 coincidencias** | **0** (`no leaks found`) | [gitleaks-antes.txt](evidencias/antes/gitleaks-antes.txt) → [gitleaks-despues.txt](evidencias/despues/gitleaks-despues.txt) |
 | **pip-audit** `app/requirements.txt` (SCA, producción) | 0 vulnerabilidades | 0 vulnerabilidades | [pip-audit-produccion-antes.txt](evidencias/antes/pip-audit-produccion-antes.txt) |
 | **pip-audit** venv local `app/.venv` (SCA) | **35 vulnerabilidades** en starlette 0.38.6, setuptools 65.5.0 y pip 24.0 | **0** | [pip-audit-venv-local-antes.txt](evidencias/antes/pip-audit-venv-local-antes.txt) → [pip-audit-venv-local-despues.txt](evidencias/despues/pip-audit-venv-local-despues.txt) |
 | **OWASP ZAP baseline** (DAST pasivo) | 0 FAIL, 8 WARN, de ellas **2 medias** (10055 y 10202) y 60 PASS | 0 FAIL, 7 WARN, **1 media** (10202, falsa alarma) y 61 PASS | [zap-antes.html](evidencias/antes/zap-antes.html) → [zap-despues.html](evidencias/despues/zap-despues.html) |
-| **pytest** (regresión) | 263 pruebas | **270 pruebas en verde**, 7 de ellas regresiones nuevas | [pytest-bandit-pipaudit-despues.txt](evidencias/despues/pytest-bandit-pipaudit-despues.txt) |
+| **pytest** (regresión) | 263 pruebas | **271 pruebas** (269 en verde y 2 omitidas en Windows), 8 de ellas regresiones nuevas | [pytest-bandit-pipaudit-despues.txt](evidencias/despues/pytest-bandit-pipaudit-despues.txt) |
 
 ## 2. Cuadro comparativo de hallazgos altos y medios
 
@@ -27,6 +28,9 @@
 | **H-4** | CSP sin `form-action` ni `base-uri` (directivas que no heredan de `default-src`) | ZAP 10055, **media** (confianza alta) | I | `default-src 'none'; frame-ancestors 'none'` ([zap-antes.json](evidencias/antes/zap-antes.json)) | Se agregan `form-action 'none'; base-uri 'none'` en Nginx y en la app | CSP completa ([csp-despues.txt](evidencias/despues/csp-despues.txt)); 10055 pasa a PASS | ✅ Corregido |
 | **H-5** | Dependabot sin `cooldown` (cadena de suministro) | Semgrep `dependabot-missing-cooldown`, **MEDIUM** | I | [semgrep-antes.json](evidencias/antes/semgrep-antes.json) | `cooldown: default-days: 7` | 0 hallazgos | ✅ Corregido |
 | **H-6** | pytest 8.4.2 con PYSEC-2026-1845 (dependencia de desarrollo) | pip-audit, **media** | I | Detectado al auditar el venv | `pytest==9.0.3` (suite completa en verde) y `pip-audit -r requirements-dev.txt` en CI | 0 CVE | ✅ Corregido |
+| **H-7** | La prueba que prohíbe scripts en línea no reconocía cierres como `</script >` | CodeQL `py/bad-tag-filter`, **high** (en código de pruebas) | I | Alerta #1 en [tests/test_frontend.py](../tests/test_frontend.py) | El cierre se busca con `</script\b[^>]*>` | La alerta se cierra al fusionar el PR de cierre | ✅ Corregido |
+| F-5 | “Log injection”: la ruta y el id de alerta del cliente llegan al audit log | CodeQL `py/log-injection`, **medium** | — | Alerta #3 en `write_log` ([app/main.py](../app/main.py)) | Falsa alarma: `write_log` serializa con `json.dumps`, que escapa `\n` y `\r`. Se prueba con `test_audit_log_cannot_be_forged_with_newlines_from_the_client` | El payload queda dentro del campo `path` de una sola línea JSON | ⚪ Falsa alarma |
+| F-6 | El secreto TOTP se imprime en texto claro | CodeQL `py/clear-text-logging-sensitive-data`, **high** | C | Alerta #2 en [app/identity_cli.py](../app/identity_cli.py) | Riesgo aceptado: es la CLI del administrador en el servidor, que muestra el secreto **una sola vez** en su terminal para enrolar el segundo factor. No va a un log ni a un archivo | Se documenta | 🟡 Aceptado |
 | F-1 | SQL formateado en `ALTER TABLE` ([app/main.py](../app/main.py)) | Semgrep, **2 × ERROR** | — | `formatted-sql-query`, `sqlalchemy-execute-raw-query` | Falsa alarma: los identificadores salen de la constante `NEW_COLUMNS`. Se marca con `nosemgrep` justificado | 0 | ⚪ Falsa alarma |
 | F-2 | Dockerfile sin `USER` | Semgrep, **ERROR** | — | `missing-user-entrypoint` en el staging local | Falsa alarma aceptada: el arranque necesita root, pero la API corre como `muvapi` y los *workers* de Nginx como `www-data` | 0 | ⚪ Falsa alarma |
 | F-3 | Formulario de login sin token anti-CSRF | ZAP 10202 (**media**, confianza baja) y Semgrep (WARNING) | — | `<form id="login-form" method="post">` | Falsa alarma: no hay cookies (`credentials: "omit"`), la autenticación es Bearer y `POST /app/` responde 403 | Sigue en ZAP (justificado), 0 en Semgrep | ⚪ Falsa alarma |
@@ -72,7 +76,7 @@ Las alertas **informativas o bajas** de ZAP (10015, 10027, 10031, 10049, 10109 y
 2. Se actualizaron pip (26.2.2) y setuptools (84.2.1).
 3. Se agregó [tests/test_dependencias.py](../tests/test_dependencias.py), que falla si el entorno no coincide con los *pins* o si Starlette es menor que 1.3.
 
-### H-3. Validación manual: un Host header manipulado falsea el audit log
+### H-3. Pentest controlado (validación manual): un Host header manipulado falsea el audit log
 
 **Hipótesis.** El audit log y la decisión entre `login_failed` y `refresh_failed` se basan en `request.url.path`. Starlette construye esa ruta con la cabecera `Host`, que controla el cliente. Con Starlette menor que 1.3, un `Host` como `lab/auth/refresh?` debería cambiar la ruta registrada.
 
@@ -161,3 +165,49 @@ Se ejecutó el workflow `DAST staging` a mano sobre `main` (`08e2da9`), run `407
 - ZAP baseline es pasivo. El staging local no incluye el WAF ni fail2ban de la VM, que están cubiertos por `tests/test_waf_config.py` y `deploy/waf-smoke.sh`.
 - Los controles nativos de GitHub (CodeQL y secret scanning) dependen del plan en un repositorio privado. Ver [SECURITY.md](SECURITY.md#4-limitaciones).
 - F-3 (10202) sigue apareciendo en ZAP porque la herramienta no puede saber que el formulario se envía con `fetch` sin cookies. Se documenta en lugar de ocultarla.
+- CodeQL y secret scanning solo existen desde que el repositorio es público (2026-11-10). Antes, Semgrep y gitleaks cubrían esos papeles.
+- El pentest fue deliberadamente acotado: peticiones inocuas, un contenedor aislado y cuentas ficticias. No se probó fuerza bruta ni denegación de servicio, que prohíben las condiciones del laboratorio. El *rate limit* y el bloqueo por cuenta se verifican con pruebas automatizadas.
+
+## 7. CodeQL (PR de cierre)
+
+Al pasar el repositorio a público se activó CodeQL *default setup* con la suite `extended`. El primer análisis (run `42888933539`, sobre `7511b4c`) revisó Python (50 reglas), JavaScript/TypeScript (103) y los workflows de Actions (23), y dio **3 alertas, todas en Python**:
+
+1. **#1 `py/bad-tag-filter` (high) → H-7, verdadero positivo en una prueba.** La prueba que garantiza que el HTML no tiene scripts en línea buscaba el cierre literal `</script>`. El navegador también acepta `</script >`, así que un script cerrado así escapaba de la comprobación. Se corrigió la expresión regular.
+2. **#3 `py/log-injection` (medium) → F-5, falsa alarma demostrada.** CodeQL ve que un dato del cliente llega a `action_logger.info()`, pero no modela que `json.dumps` escapa los saltos de línea. La prueba nueva envía `GET /alerts/x%0A%0D{"action":"login_ok",...}` y verifica que no aparece ninguna entrada forjada y que el payload queda dentro del campo `path`.
+3. **#2 `py/clear-text-logging-sensitive-data` (high) → F-6, riesgo aceptado.** `identity_cli enroll-totp` imprime el secreto TOTP una vez, en la terminal del administrador. Es el comportamiento esperado de un enrolamiento: el secreto se guarda cifrado con Fernet y nunca pasa por el audit log.
+
+**Lección:** CodeQL sigue el flujo de datos entre funciones y encontró algo que Semgrep (patrones) y Bandit no marcaron. Al revés, Semgrep detectó la configuración de Dependabot (H-5), que CodeQL no revisa. Usar los dos se justifica.
+
+## 8. Arquitectura del pipeline
+
+```
+push / pull_request a main
+├── DevSecOps (devsecops.yml)
+│   ├── pruebas ............ pytest (regresiones H-2, H-3, H-4, H-7, F-5)
+│   ├── sast ............... Bandit (puerta en severidad alta)
+│   ├── dependencias ....... pip-audit --strict (producción y desarrollo)
+│   ├── secretos ........... gitleaks
+│   └── despliegue ......... bash -n, ShellCheck, finales de línea LF
+├── Seguridad estatica (seguridad-estatica.yml)
+│   ├── semgrep ............ artefacto resultado-semgrep + puerta en ERROR
+│   ├── secretos ........... gitleaks
+│   └── revision-dependencias  Dependency Review (solo en PR, falla desde moderada)
+└── CodeQL (default setup de GitHub) ... Python, JS/TS y Actions → pestaña Security
+
+Manual (workflow_dispatch)
+└── DAST staging (dast-staging.yml) .... staging HTTPS en el runner → ZAP baseline → artefacto informe-zap
+
+Nativos de GitHub: Dependabot alerts + security updates, Dependabot version updates
+(Actions y pip, cooldown de 7 días), secret scanning + push protection.
+```
+
+Todas las acciones de terceros se fijan por SHA de commit y las imágenes por *digest*; los workflows tienen `permissions: contents: read` y solo el job de gitleaks agrega `pull-requests: read`.
+
+## 9. Conclusiones y aprendizajes
+
+- **Un check verde no significa una aplicación segura.** Los informes de Semgrep y ZAP no bloquean (`|| true`) y la puerta solo corta en severidad alta. La seguridad la demuestra el ciclo completo de cada hallazgo: detectarlo, entenderlo, corregirlo y volver a ejecutar la herramienta (H-1 a H-7).
+- **Cada herramienta ve una capa distinta.** SAST encontró configuración y código (H-5, H-7), SCA encontró dependencias (H-2, H-6), DAST encontró cabeceras HTTP (H-4), y el hallazgo con más impacto (H-3, integridad del audit log) salió de unir un CVE de SCA con una validación manual. Ninguna herramienta lo habría encontrado sola.
+- **La mitad de los resultados fueron falsas alarmas** (F-1 a F-6). Clasificarlas con una justificación verificable (una prueba, una huella en `.gitleaksignore`, un `nosemgrep` comentado) vale tanto como corregir, y evita apagar el escáner.
+- **Que una dependencia sea vulnerable no implica que el código sea explotable.** De los 35 CVE de H-2 solo uno era alcanzable desde el código, y se corrigió en la aplicación (`scope["path"]`), de modo que la defensa no depende de la versión de Starlette.
+- **El propio pipeline es superficie de ataque:** permisos mínimos, acciones fijadas por SHA y un `cooldown` en Dependabot reducen el riesgo de cadena de suministro.
+- **Riesgo residual:** F-3 (CSRF en ZAP, mitigado por no usar cookies), F-6 (secreto TOTP en la terminal del administrador) y que el staging del DAST no incluye el WAF ni fail2ban de la VM.
