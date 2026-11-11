@@ -1,0 +1,34 @@
+PR #15 (demo SQLi) y PR #16 (demo CSP): estado y checks, 2026-11-11T03:16:40Z
+
+== PR 15
+mergeStateStatus: BLOCKED
+  Pruebas automatizadas: FAILURE
+  SAST (Semgrep): FAILURE
+  Analyze (actions): SUCCESS
+  Analyze (javascript-typescript): SUCCESS
+  Analyze (python): SUCCESS
+  Analisis estatico (Bandit): SUCCESS
+  Secretos (gitleaks): SUCCESS
+  Auditoria de dependencias (pip-audit): SUCCESS
+  SCA (Dependency Review): SUCCESS
+  Busqueda de secretos (gitleaks): SUCCESS
+  Scripts y configuracion de despliegue: SUCCESS
+  CodeQL: FAILURE
+
+== PR 16
+mergeStateStatus: BLOCKED
+  Pruebas automatizadas: FAILURE
+  Analyze (actions): SUCCESS
+  SAST (Semgrep): SUCCESS
+  Analyze (javascript-typescript): SUCCESS
+  Analyze (python): SUCCESS
+  Analisis estatico (Bandit): SUCCESS
+  Secretos (gitleaks): SUCCESS
+  Auditoria de dependencias (pip-audit): SUCCESS
+  SCA (Dependency Review): SUCCESS
+  Busqueda de secretos (gitleaks): SUCCESS
+  Scripts y configuracion de despliegue: SUCCESS
+  CodeQL: SUCCESS
+
+== Alerta CodeQL abierta en refs/pull/15/head
+#4 py/sql-injection high app/main.py:1091
