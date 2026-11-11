@@ -79,6 +79,10 @@ CodeQL, secret scanning y Dependency Review **no están disponibles en repositor
 
 Ver [docs/SECURITY.md §5](docs/SECURITY.md#5-decisión-de-riesgo-repositorio-público-revisión-de-g12).
 
+*Figura 1. Security and quality: alertas de Dependabot, code scanning y secret scanning habilitadas.*
+
+![Controles de seguridad nativos de GitHub habilitados](docs/img/01-advanced-security.png)
+
 ---
 
 ## 3. Arquitectura del pipeline
@@ -159,6 +163,22 @@ jobs:
 | `non_fast_forward`, `deletion` | Sin reescribir ni borrar `main` |
 | Bypass list vacía | Ni siquiera el administrador se salta las reglas |
 
+*Figura 2. Ruleset `proteger-main` activo sobre la rama por defecto.*
+
+![Ruleset proteger-main](docs/img/02-ruleset.png)
+
+*Figura 3. Actions: los workflows DevSecOps, Seguridad estática, CodeQL, DAST staging y Dependabot, todos en verde sobre `main`.*
+
+![Lista de workflows en GitHub Actions](docs/img/05-actions-lista.png)
+
+*Figura 4. DevSecOps #45 sobre `main`: pytest, Bandit, pip-audit, gitleaks y ShellCheck en verde.*
+
+![Run de DevSecOps sobre main](docs/img/08-devsecops-run.png)
+
+*Figura 5. Seguridad estática #29 sobre `main`: Semgrep y gitleaks en verde, con los artefactos `resultado-semgrep` y `gitleaks-results.sarif`. Dependency Review aparece como omitido porque solo corre en PR. El JSON del artefacto está en [docs/evidencias/ci/resultado-semgrep-final/semgrep.json](docs/evidencias/ci/resultado-semgrep-final/semgrep.json): 0 resultados en 66 rutas.*
+
+![Run de Seguridad estática con artefactos](docs/img/10-artefacto-semgrep.png)
+
 ---
 
 ## 4. SAST: Semgrep, CodeQL y Bandit
@@ -199,6 +219,14 @@ for column, sql_type in NEW_COLUMNS:   # constante definida en el código, sin d
 | #1 `py/bad-tag-filter` (high) | **Verdadero positivo → H-7** | La prueba que prohíbe scripts en línea no reconocía `</script >`; se corrigió la expresión regular. Ahora está *fixed* |
 | #3 `py/log-injection` (medium) | **Falso positivo → F-5** | `json.dumps` escapa `\n` y `\r`. Se demostró con una prueba nueva y se descartó como *False positive* |
 | #2 `py/clear-text-logging-sensitive-data` (high) | **Riesgo aceptado → F-6** | La CLI del administrador muestra el secreto TOTP una sola vez, para enrolarlo. Se descartó como *Won't fix* |
+
+*Figura 6. Code scanning: 0 alertas abiertas y las 3 cerradas con su motivo (fixed, false positive y won't fix).*
+
+![Alertas de CodeQL cerradas](docs/img/11-codeql-cerradas.png)
+
+*Figura 7. Alerta #3 (`py/log-injection`): descartada como falso positivo, con la justificación y la prueba que lo demuestra.*
+
+![Detalle de la alerta #3 de CodeQL](docs/img/12-codeql-alerta-3.png)
 
 Corrección de H-7 ([tests/test_frontend.py](tests/test_frontend.py)):
 
@@ -249,6 +277,10 @@ Evidencia: el run [#12](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publ
 
 ![Run #12 de DevSecOps tras la corrección](docs/img/gitleaks-run-12-fix.png)
 
+*Figura 8. Secret scanning de GitHub: ningún secreto en todo el historial.*
+
+![Secret scanning sin alertas](docs/img/14-secret-scanning.png)
+
 ---
 
 ## 6. SCA: Dependabot, Dependency Review y pip-audit
@@ -277,6 +309,10 @@ pip-audit sobre el entorno virtual local encontró **35 vulnerabilidades** (Star
 | #10 | uvicorn 0.40 → 0.54 | Sí (servidor ASGI) | No | No (CI en verde, incluida la regresión de H-3) | Validado también con DAST ([§11.3](#113-validación-de-las-actualizaciones-de-dependabot-10-y-11)): sin cambios → **se aprueba** |
 | #11 | fastapi 0.142 → 0.162 | Sí (arrastra Starlette, base de H-3) | No | No | Igual que #10: DAST sin cambios → **se aprueba** |
 
+*Figura 9. PRs de Dependabot: fusionados (#1, #3, #4 y #9), cerrados tras el triage (#2, #7 y #8) y en revisión (#10 y #11).*
+
+![PRs abiertos por Dependabot](docs/img/15-dependabot-prs.png)
+
 Corrección de H-8:
 
 ```yaml
@@ -291,6 +327,10 @@ Corrección de H-8:
 
 - **H-6:** pytest 8.4.2 tenía PYSEC-2026-1845. Se actualizó a `pytest==9.0.3` tras comprobar que toda la suite pasa, y la CI ahora audita también `requirements-dev.txt`.
 - **Dependency Review** frena en cada PR cualquier dependencia nueva con una vulnerabilidad moderada o mayor. En un *push* aparece como *skipped* a propósito, porque no hay un PR contra el cual comparar.
+
+*Figura 10. Dependabot alerts: 0 alertas de malware abiertas en las dependencias.*
+
+![Alertas de Dependabot](docs/img/13-dependabot-alertas.png)
 
 ---
 
@@ -336,6 +376,10 @@ def test_every_csp_declares_directives_without_fallback():
         assert {"form-action", "base-uri", "frame-ancestors"} <= directives, csp
 ```
 
+*Figura 11. Diff del PR #5 en `app/main.py`: la constante `API_CSP` agrega `form-action` y `base-uri` a la CSP de la API.*
+
+![Diff de la corrección de H-4](docs/img/18b-pr5-diff-h4-csp.png)
+
 ### 7.4 Del informe a la puerta: `.zap/rules.tsv`
 
 El kit pide usar `-I` en el primer laboratorio y *"cambiar a un control estricto cuando haya triage"*. Con el triage hecho, [.zap/rules.tsv](.zap/rules.tsv) convierte el DAST en una **puerta de regresión**:
@@ -355,6 +399,10 @@ El kit pide usar `-I` en el primer laboratorio y *"cambiar a un control estricto
 # .github/workflows/dast-staging.yml
 zap-baseline.py -t "$TARGET" -c rules.tsv -r informe-zap.html -J informe-zap.json -w informe-zap.md -I
 ```
+
+*Figura 12. `.zap/rules.tsv`: las reglas en FAIL (puerta de regresión) y la falsa alarma F-3 en IGNORE.*
+
+![Reglas de la puerta de ZAP](docs/img/26-zap-rules.png)
 
 Con `-I`, los WARN siguen sin romper el build, pero **un FAIL sí lo rompe**. Las alertas informativas restantes (10015, 10027, 10031, 10049, 10109 y 10111) se revisaron y se explican en [REPORTE_HALLAZGOS.md](docs/REPORTE_HALLAZGOS.md).
 
@@ -393,6 +441,10 @@ docker run --rm -e OLD=1 -v "$PWD:/src:ro" -w /src python:3.12-slim bash deploy/
 +        action = "refresh_failed" if request.scope["path"] == "/auth/refresh" else "login_failed"
 ```
 
+*Figura 13. Diff del PR #5 en `app/main.py`: `route_path()` usa `scope["path"]` en lugar de `request.url.path`.*
+
+![Diff de la corrección de H-3](docs/img/18-pr5-diff-h3.png)
+
 **Después** ([validar-host-header-despues.txt](docs/evidencias/despues/validar-host-header-despues.txt)), **incluso con Starlette 0.38.6 vulnerable**:
 
 ```json
@@ -401,6 +453,10 @@ docker run --rm -e OLD=1 -v "$PWD:/src:ro" -w /src python:3.12-slim bash deploy/
 ```
 
 A través de Nginx, el mismo `Host` recibe **400** y no llega a la app ([host-header-nginx.txt](docs/evidencias/despues/host-header-nginx.txt)).
+
+*Figura 14. Antes (izquierda) y después (derecha): la línea 6 pasa de `refresh_failed` a `login_failed` con el mismo `Host` malicioso.*
+
+![Comparación del audit log antes y después de H-3](docs/img/24-h3-antes-despues.png)
 
 **Prueba de regresión.** Se comprobó que **falla con el código anterior** ([regresion-host-codigo-antes.txt](docs/evidencias/antes/regresion-host-codigo-antes.txt)):
 
@@ -457,6 +513,18 @@ Riesgo = **probabilidad × impacto**, en escala 1–3 (1–2 bajo, 3–4 medio, 
 
 Cada PR lleva el checklist del kit ([docs/CHECKLIST_PR.md](docs/CHECKLIST_PR.md)), que también es la plantilla de PR del repositorio.
 
+*Figura 15. PR #5 fusionado: la tabla de hallazgos corregidos con su prueba de regresión.*
+
+![PR #5 fusionado](docs/img/16-pr5-checks.png)
+
+*Figura 16. PR #6 fusionado con 12 checks y el checklist de seguridad completo.*
+
+![PR #6 con el checklist de seguridad](docs/img/17-pr6-checks.png)
+
+*Figura 17. Pruebas en local: `269 passed, 2 skipped`. Las 2 omitidas prueban scripts Bash y se ejecutan en la CI (Ubuntu). La advertencia es una deprecación de `httpx` en el cliente de pruebas.*
+
+![Resultado de pytest en local](docs/img/25-pytest.png)
+
 ---
 
 ## 11. Prueba de que el pipeline bloquea (PRs de demostración)
@@ -476,6 +544,14 @@ La pregunta final de la clase fue: *¿qué demuestra seguridad?* No basta con mo
 | **pytest** ([run 42950911218](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/42950911218)) | ❌ `test_every_csp_declares_directives_without_fallback` → `AssertionError: default-src 'none'; frame-ancestors 'none'` (y `test_frontend_csp_only_in_its_location`) |
 | **Ruleset** | 🔒 PR en estado **BLOCKED**: el check obligatorio *Pruebas automatizadas* falló. El DAST manual la atrapa además en tiempo de ejecución: **dos capas independientes** |
 
+*Figura 18. PR #16 bloqueado: el check obligatorio de pruebas falló.*
+
+![PR #16 bloqueado](docs/img/22-pr16-bloqueado.png)
+
+*Figura 19. DAST staging #4 sobre `demo/regresion-csp`: el workflow falla por la regla 10055 en FAIL.*
+
+![DAST en rojo por la regresión de la CSP](docs/img/23-dast-rojo.png)
+
 ### 11.2 Inyección SQL nueva ([PR #15](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/pull/15))
 
 ```python
@@ -494,6 +570,18 @@ def demo_alerts_by_ip(ip: str, analyst: Analyst = Depends(require_analyst)):
 | **pytest** ([run 42950880980](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/42950880980)) | ❌ `test_auth_scope_is_derived_from_the_route_dependencies`: toda ruta nueva debe declararse en el inventario de autorización. Es una invariante de arquitectura que también la detecta |
 | **Bandit** | ✅ No la bloquea: B608 es severidad *medium* y la puerta solo corta en *high*. Por eso conviene tener varias herramientas |
 | **Ruleset** | 🔒 PR **BLOCKED**: 3 checks obligatorios en rojo (CodeQL, Semgrep y pytest) |
+
+*Figura 20. PR #15 bloqueado: CodeQL, pytest y Semgrep, los tres obligatorios, en rojo.*
+
+![PR #15 bloqueado](docs/img/19-pr15-bloqueado.png)
+
+*Figura 21. CodeQL comenta en el PR la línea 1091 (`SQL query built from user-controlled sources`, High) y propone la consulta parametrizada.*
+
+![Alerta de CodeQL en el diff del PR #15](docs/img/20-pr15-codeql.png)
+
+*Figura 22. El check de code scanning falla con "1 new alert including 1 high severity security vulnerability".*
+
+![Check de CodeQL del PR #15](docs/img/20b-pr15-codeql-check.png)
 
 **Lectura:** tres herramientas distintas, con técnicas distintas (flujo de datos, patrones e invariantes de pruebas), detectan la misma vulnerabilidad. Ninguna persona del equipo podía fusionarla, ni siquiera el administrador, porque la lista de bypass está vacía.
 
