@@ -1,0 +1,22 @@
+# Reglas de ZAP baseline (laboratorio FSI). Formato: id<TAB>accion<TAB>(nombre). Accion: FAIL, WARN, IGNORE.
+# Las reglas que no aparecen quedan en WARN (informan, no fallan).
+#
+# FAIL = puerta de regresion: si reaparece, el workflow DAST falla.
+#   10055: hallazgo H-4 (CSP sin form-action ni base-uri), corregido en el PR #5.
+#   10038: falta la cabecera CSP por completo.
+#   10020: falta X-Frame-Options / frame-ancestors (clickjacking).
+#   10021: falta X-Content-Type-Options: nosniff.
+#   10035: falta Strict-Transport-Security (HSTS).
+#   10010 / 10011: cookie sin HttpOnly / sin Secure (la app no usa cookies: si aparece una, es una regresion).
+#
+# IGNORE = falsa alarma revisada y justificada en docs/REPORTE_HALLAZGOS.md:
+#   10202: F-3, formulario sin token anti-CSRF. La autenticacion es Bearer, sin cookies
+#          (credentials: "omit"), asi que no hay CSRF posible.
+10055	FAIL	(CSP: Failure to Define Directive with No Fallback)
+10038	FAIL	(Content Security Policy (CSP) Header Not Set)
+10020	FAIL	(Missing Anti-clickjacking Header)
+10021	FAIL	(X-Content-Type-Options Header Missing)
+10035	FAIL	(Strict-Transport-Security Header Not Set)
+10010	FAIL	(Cookie No HttpOnly Flag)
+10011	FAIL	(Cookie Without Secure Flag)
+10202	IGNORE	(Absence of Anti-CSRF Tokens)

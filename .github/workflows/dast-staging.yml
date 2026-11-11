@@ -43,13 +43,23 @@ jobs:
         if: env.STAGING_URL != ''
         run: echo "TARGET=$STAGING_URL" >> "$GITHUB_ENV"
 
-      # -I: las advertencias no fallan el job (el informe es la evidencia; la revision es manual).
+      # Puerta de regresion: .zap/rules.tsv marca como FAIL las alertas ya corregidas (H-4, 10055) y
+      # las cabeceras de seguridad basicas, e IGNORE las falsas alarmas justificadas (F-3, 10202).
+      # -I: las advertencias (WARN) no fallan el job; los FAIL si. Despues del triage, el DAST ya no
+      # solo informa: un cambio que rompa la CSP pone el workflow en rojo.
       - name: ZAP baseline
         run: |
           mkdir -p zap && chmod 777 zap
+          cp .zap/rules.tsv zap/rules.tsv
+          status=0
           docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
-            zap-baseline.py -t "$TARGET" -r informe-zap.html -J informe-zap.json -w informe-zap.md -I
+            zap-baseline.py -t "$TARGET" -c rules.tsv -r informe-zap.html -J informe-zap.json -w informe-zap.md -I \
+            || status=$?
           cat zap/informe-zap.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=DAST::ZAP encontro una regla en FAIL (regresion de seguridad). Ver el informe."
+          fi
+          exit "$status"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
