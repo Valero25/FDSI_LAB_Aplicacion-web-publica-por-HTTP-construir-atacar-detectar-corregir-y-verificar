@@ -1081,3 +1081,12 @@ def get_network_device(device_id: DeviceId, request: Request, analyst: Analyst =
         raise HTTPException(status_code=404, detail="Device not found")
     log_action(request, "get_network_device", actor=actor)
     return _device_for_role(device, analyst.role)
+
+
+# DEMO (NO FUSIONAR): vulnerabilidad introducida a proposito para comprobar que el pipeline la bloquea.
+# El parametro "ip" llega del cliente y se concatena en la consulta SQL (inyeccion SQL, CWE-89).
+@app.get("/demo/alerts-by-ip")
+def demo_alerts_by_ip(ip: str, analyst: Analyst = Depends(require_analyst)):
+    with get_db() as conn:
+        rows = conn.execute("SELECT id FROM alerts WHERE source_ip = '" + ip + "'").fetchall()
+    return [row["id"] for row in rows]
