@@ -39,11 +39,11 @@
 | ID | Hallazgo | Fuente / severidad | CIA | Antes (evidencia) | Corrección | Después (evidencia) | Estado |
 |---|---|---|---|---|---|---|---|
 | **H-1** | gitleaks fallaba en los PR (403 en `GET /pulls/{n}/commits`) | CI (alta para el proceso) | I | PR de Dependabot #1, #3 y #4 en rojo por el job `secretos` | `permissions: pull-requests: read` solo en ese job (`009b919`) | Runs [#12](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/40784768358) y [#18](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/40785462060) en verde ([capturas](#h-1-gitleaks-fallaba-en-los-pull-requests)) | ✅ Corregido |
-| **H-2** | Venv local con starlette 0.38.6, setuptools 65.5.0 y pip 24.0 | pip-audit: 35 CVE, varias **altas** | C/I/D | [pip-audit-venv-local-antes.txt](evidencias/antes/pip-audit-venv-local-antes.txt) | Venv reinstalado desde `requirements.txt`, más la prueba [test_dependencias.py](../tests/test_dependencias.py) | 0 CVE ([despues](evidencias/despues/pip-audit-venv-local-despues.txt)) | ✅ Corregido |
-| **H-3** | Un Host header manipulado reescribe la ruta y la acción del audit log | Validación manual del CVE de Starlette (**media**) | **I** | `login_failed` registrado como `refresh_failed` en `/auth/refresh` ([antes](evidencias/antes/validar-host-header-antes.txt)) | `route_path()` y `scope["path"]` en lugar de `request.url.path` | Siempre `login_failed` en `/auth/login`, incluso con Starlette vulnerable ([despues](evidencias/despues/validar-host-header-despues.txt)) | ✅ Corregido |
+| **H-2** | Venv local con starlette 0.38.6, setuptools 65.5.0 y pip 24.0 | pip-audit: 35 líneas = 18 avisos (CVE en [INFORME_LAB5.md §6.1](../INFORME_LAB5.md#61-dependencia-analizada-starlette-0386-h-2)), varias **altas** | C/I/D | [pip-audit-venv-local-antes.txt](evidencias/antes/pip-audit-venv-local-antes.txt) | Venv reinstalado desde `requirements.txt`, más la prueba [test_dependencias.py](../tests/test_dependencias.py) | 0 CVE ([despues](evidencias/despues/pip-audit-venv-local-despues.txt)) | ✅ Corregido |
+| **H-3** | Un Host header manipulado reescribe la ruta y la acción del audit log | Validación manual de **CVE-2026-48710** («BadHost», Starlette < 1.0.1, **media**) | **I** | `login_failed` registrado como `refresh_failed` en `/auth/refresh` ([antes](evidencias/antes/validar-host-header-antes.txt)) | `route_path()` y `scope["path"]` en lugar de `request.url.path` | Siempre `login_failed` en `/auth/login`, incluso con Starlette vulnerable ([despues](evidencias/despues/validar-host-header-despues.txt)) | ✅ Corregido |
 | **H-4** | CSP sin `form-action` ni `base-uri` (directivas que no heredan de `default-src`) | ZAP 10055, **media** (confianza alta) | I | `default-src 'none'; frame-ancestors 'none'` ([zap-antes.json](evidencias/antes/zap-antes.json)) | Se agregan `form-action 'none'; base-uri 'none'` en Nginx y en la app | CSP completa ([csp-despues.txt](evidencias/despues/csp-despues.txt)); 10055 pasa a PASS | ✅ Corregido |
 | **H-5** | Dependabot sin `cooldown` (cadena de suministro) | Semgrep `dependabot-missing-cooldown`, **MEDIUM** | I | [semgrep-antes.json](evidencias/antes/semgrep-antes.json) | `cooldown: default-days: 7` | 0 hallazgos | ✅ Corregido |
-| **H-6** | pytest 8.4.2 con PYSEC-2026-1845 (dependencia de desarrollo) | pip-audit, **media** | I | Detectado al auditar el venv | `pytest==9.0.3` (suite completa en verde) y `pip-audit -r requirements-dev.txt` en CI | 0 CVE | ✅ Corregido |
+| **H-6** | pytest 8.4.2 con PYSEC-2026-1845 / **CVE-2025-71176** (dependencia de desarrollo) | pip-audit, **media** | I | Detectado al auditar el venv | `pytest==9.0.3` (suite completa en verde) y `pip-audit -r requirements-dev.txt` en CI | 0 CVE | ✅ Corregido |
 | **H-7** | La prueba que prohíbe scripts en línea no reconocía cierres como `</script >` | CodeQL `py/bad-tag-filter`, **high** (en código de pruebas) | I | Alerta #1 en [tests/test_frontend.py](../tests/test_frontend.py) | El cierre se busca con `</script\b[^>]*>` | Alerta #1 en estado **fixed** tras fusionar el [PR #6](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/pull/6) (`424ac63`) | ✅ Corregido |
 | **H-8** | Dependabot pip duplicaba los PR de fastapi y uvicorn | Revisión manual de los PR de Dependabot (operativa) | I | PRs #7 y #8 iguales a #11 y #10 | `allow: pytest, httpx` en la entrada `/` de [dependabot.yml](../.github/dependabot.yml) ([PR #12](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/pull/12)) | #7 y #8 cerrados; el siguiente ciclo ya no los repite | ✅ Corregido |
 | F-5 | “Log injection”: la ruta y el id de alerta del cliente llegan al audit log | CodeQL `py/log-injection`, **medium** | — | Alerta #3 en `write_log` ([app/main.py](../app/main.py)) | Falsa alarma: `write_log` serializa con `json.dumps`, que escapa `\n` y `\r`. Se prueba con `test_audit_log_cannot_be_forged_with_newlines_from_the_client` | El payload queda dentro del campo `path` de una sola línea JSON | ⚪ Falsa alarma |
@@ -101,10 +101,11 @@ Por eso se corrigieron primero H-1 y H-3, aunque H-2 tenía la severidad más al
 
 **¿Aplica realmente al código?**
 
-- **DoS con multipart y urlencoded:** no aplica. La app no usa `Form`, `UploadFile` ni `request.form()`, y responde 415 a cualquier cuerpo que no sea JSON.
-- **`StaticFiles`:** no aplica. Nginx sirve el frontend.
-- **El Host header que altera `request.url.path`:** sí aplica, y se validó en H-3.
-- **setuptools y pip:** solo afectan al instalar paquetes.
+- **DoS con multipart y urlencoded** (CVE-2024-47874, CVE-2025-54121, CVE-2026-54283): no aplica. La app no usa `Form`, `UploadFile` ni `request.form()`, y responde 415 a cualquier cuerpo que no sea JSON.
+- **`StaticFiles`** (CVE-2026-48818) y **`HTTPEndpoint`** (CVE-2026-48817): no aplican. Nginx sirve el frontend y la app no usa `HTTPEndpoint`.
+- **El Host header que altera `request.url.path`** (**CVE-2026-48710**, «BadHost»): sí aplica, y se validó en H-3. CVE-2026-54282, del mismo origen, afecta a `url.hostname`, que la app no usa.
+- **Cómo se obtuvieron los CVE:** `pip-audit --aliases on` ([pip-audit-aliases-antes.txt](evidencias/antes/pip-audit-aliases-antes.txt)) y OSV.dev. El método completo está en [INFORME_LAB5.md §6.2](../INFORME_LAB5.md#62-cómo-se-identifica-qué-cve-afecta-a-la-aplicación).
+- **setuptools y pip** (10 CVE y un GHSA sin CVE): solo afectan al instalar paquetes.
 
 **Medida correctiva:**
 
@@ -145,7 +146,7 @@ Por eso se corrigieron primero H-1 y H-3, aunque H-2 tenía la severidad más al
 
 Semgrep (MEDIUM) detectó que Dependabot proponía cualquier versión el mismo día de su publicación. Si una acción de GitHub se compromete, la versión maliciosa llegaría como PR de inmediato. Con `cooldown: default-days: 7` hay una semana para que la comunidad la detecte y la retire.
 
-### H-6. pytest 8.4.2 (PYSEC-2026-1845)
+### H-6. pytest 8.4.2 (PYSEC-2026-1845 / CVE-2025-71176)
 
 pytest apareció al auditar el venv recreado. Antes de actualizar se comprobó la compatibilidad: la suite completa pasa con `pytest==9.0.3` (270 pruebas). Además, la CI ahora audita también `requirements-dev.txt`.
 

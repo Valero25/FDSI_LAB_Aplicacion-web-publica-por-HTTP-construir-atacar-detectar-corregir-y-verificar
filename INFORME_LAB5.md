@@ -79,6 +79,10 @@ CodeQL, secret scanning y Dependency Review **no están disponibles en repositor
 
 Ver [docs/SECURITY.md §5](docs/SECURITY.md#5-decisión-de-riesgo-repositorio-público-revisión-de-g12).
 
+*Figura 1. Security and quality: alertas de Dependabot, code scanning y secret scanning habilitadas.*
+
+![Controles de seguridad nativos de GitHub habilitados](docs/img/01-advanced-security.png)
+
 ---
 
 ## 3. Arquitectura del pipeline
@@ -159,6 +163,26 @@ jobs:
 | `non_fast_forward`, `deletion` | Sin reescribir ni borrar `main` |
 | Bypass list vacía | Ni siquiera el administrador se salta las reglas |
 
+*Figura 2. Ruleset `proteger-main` activo sobre la rama por defecto.*
+
+![Ruleset proteger-main](docs/img/02-ruleset.png)
+
+*Figura 3. Reglas de `proteger-main`: borrado restringido, PR obligatorio, status checks, sin force push y CodeQL sin alertas High or higher ni errores.*
+
+![Reglas del ruleset proteger-main](docs/img/03-ruleset-checks.png)
+
+*Figura 4. Actions: los workflows DevSecOps, Seguridad estática, CodeQL, DAST staging y Dependabot, todos en verde sobre `main`.*
+
+![Lista de workflows en GitHub Actions](docs/img/05-actions-lista.png)
+
+*Figura 5. DevSecOps #45 sobre `main`: pytest, Bandit, pip-audit, gitleaks y ShellCheck en verde.*
+
+![Run de DevSecOps sobre main](docs/img/08-devsecops-run.png)
+
+*Figura 6. Seguridad estática #29 sobre `main`: Semgrep y gitleaks en verde, con los artefactos `resultado-semgrep` y `gitleaks-results.sarif`. Dependency Review aparece como omitido porque solo corre en PR. El JSON del artefacto está en [docs/evidencias/ci/resultado-semgrep-final/semgrep.json](docs/evidencias/ci/resultado-semgrep-final/semgrep.json): 0 resultados en 66 rutas.*
+
+![Run de Seguridad estática con artefactos](docs/img/10-artefacto-semgrep.png)
+
 ---
 
 ## 4. SAST: Semgrep, CodeQL y Bandit
@@ -199,6 +223,14 @@ for column, sql_type in NEW_COLUMNS:   # constante definida en el código, sin d
 | #1 `py/bad-tag-filter` (high) | **Verdadero positivo → H-7** | La prueba que prohíbe scripts en línea no reconocía `</script >`; se corrigió la expresión regular. Ahora está *fixed* |
 | #3 `py/log-injection` (medium) | **Falso positivo → F-5** | `json.dumps` escapa `\n` y `\r`. Se demostró con una prueba nueva y se descartó como *False positive* |
 | #2 `py/clear-text-logging-sensitive-data` (high) | **Riesgo aceptado → F-6** | La CLI del administrador muestra el secreto TOTP una sola vez, para enrolarlo. Se descartó como *Won't fix* |
+
+*Figura 7. Code scanning: 0 alertas abiertas y las 3 cerradas con su motivo (fixed, false positive y won't fix).*
+
+![Alertas de CodeQL cerradas](docs/img/11-codeql-cerradas.png)
+
+*Figura 8. Alerta #3 (`py/log-injection`): descartada como falso positivo, con la justificación y la prueba que lo demuestra.*
+
+![Detalle de la alerta #3 de CodeQL](docs/img/12-codeql-alerta-3.png)
 
 Corrección de H-7 ([tests/test_frontend.py](tests/test_frontend.py)):
 
@@ -249,26 +281,92 @@ Evidencia: el run [#12](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publ
 
 ![Run #12 de DevSecOps tras la corrección](docs/img/gitleaks-run-12-fix.png)
 
+*Figura 9. Secret scanning de GitHub: ningún secreto en todo el historial.*
+
+![Secret scanning sin alertas](docs/img/14-secret-scanning.png)
+
 ---
 
 ## 6. SCA: Dependabot, Dependency Review y pip-audit
 
 ### 6.1 Dependencia analizada: Starlette 0.38.6 (H-2)
 
-pip-audit sobre el entorno virtual local encontró **35 vulnerabilidades** (Starlette 0.38.6, setuptools 65.5.0 y pip 24.0). En vez de actualizar a ciegas, se revisó **si cada una aplica al código**:
+pip-audit sobre el entorno virtual local encontró **35 vulnerabilidades** (Starlette 0.38.6, setuptools 65.5.0 y pip 24.0). Algunas líneas se repiten: en total son **18 avisos distintos**. En vez de actualizar a ciegas, se revisó **si cada uno aplica al código**. El CVE de cada ID se obtuvo con `pip-audit --aliases on` ([pip-audit-aliases-antes.txt](docs/evidencias/antes/pip-audit-aliases-antes.txt)) y se confirmó en [OSV.dev](https://osv.dev); el método se explica en la [§6.2](#62-cómo-se-identifica-qué-cve-afecta-a-la-aplicación).
 
-| CVE / familia | ¿Aplica? | Razón |
-|---|---|---|
-| DoS con multipart y urlencoded | ❌ | La app no usa `Form` ni `UploadFile`, y responde 415 a todo lo que no sea JSON |
-| `StaticFiles` | ❌ | El frontend lo sirve Nginx |
-| **Host header que altera `request.url.path`** | ✅ | **Sí aplica** → se validó en el pentest (H-3) |
-| setuptools y pip | ❌ en tiempo de ejecución | Solo afectan al instalar paquetes |
+**Starlette 0.38.6 (7 avisos):**
+
+| CVE | ID de pip-audit / GHSA | Qué permite | Corregido en | ¿Aplica? | Razón |
+|---|---|---|---|---|---|
+| CVE-2024-47874 | PYSEC-2026-1943 / GHSA-f96h-pmfr-66vw | DoS con `multipart/form-data` | 0.40.0 | ❌ | La app no usa `Form` ni `UploadFile`, y responde 415 a todo lo que no sea JSON |
+| CVE-2025-54121 | PYSEC-2026-1941 / GHSA-2c2j-9gv5-cj73 | DoS al procesar archivos grandes en multipart | 0.47.2 | ❌ | Igual: no hay formularios |
+| **CVE-2026-48710** («BadHost») | **PYSEC-2026-161 / GHSA-86qp-5c8j-p5mr** | **El `Host` sin validar envenena `request.url.path`** | **1.0.1** | ✅ | **Sí aplica:** el audit log usaba `request.url.path` → validado en el pentest (**H-3**). CVSS 3.1: 6.5 (media), CWE-444 |
+| CVE-2026-54282 | PYSEC-2026-248 / GHSA-jp82-jpqv-5vv3 | Una ruta que no empieza por `/` vuelve controlable `request.url.hostname` | 1.3.0 | ❌ | Mismo origen que BadHost, pero la app no lee `url.hostname` ni `url.netloc` |
+| CVE-2026-54283 | PYSEC-2026-249 / GHSA-82w8-qh3p-5jfq | `request.form()` ignora sus límites de tamaño (DoS) | 1.3.1 | ❌ | La app no llama a `request.form()` |
+| CVE-2026-48817 | PYSEC-2026-2280 / GHSA-x746-7m8f-x49c | `HTTPEndpoint` resuelve mal el método HTTP | 1.1.0 | ❌ | La app no usa `HTTPEndpoint` |
+| CVE-2026-48818 | PYSEC-2026-2281 / GHSA-wqp7-x3pw-xc5r | SSRF con `StaticFiles` en Windows (rutas UNC) | 1.1.0 | ❌ | El frontend lo sirve Nginx |
+
+**setuptools 65.5.0 y pip 24.0 (11 avisos), y pytest 8.4.2 (H-6):**
+
+| Paquete | CVE | ID de pip-audit | Qué permite | Corregido en |
+|---|---|---|---|---|
+| setuptools | CVE-2022-40897 | PYSEC-2022-43012 | DoS con HTML malicioso en `PackageIndex` | 65.5.1 |
+| setuptools | CVE-2024-6345 | PYSEC-2026-1918 | Inyección de comandos mediante la URL de un paquete | 70.0.0 |
+| setuptools | CVE-2025-47273 | PYSEC-2025-49 | *Path traversal* en `PackageIndex` | 78.1.1 |
+| setuptools | CVE-2026-59890 | PYSEC-2026-3447 | Exclusiones de `MANIFEST.in` mal aplicadas | 83.0.0 |
+| setuptools | — (sin CVE) | GHSA-xmj3-9gf7-h52w | Escape de ruta en Windows al instalar *wheels* antiguos | 84.1.0 |
+| pip | CVE-2025-8869 | PYSEC-2026-1795 | Un `tar` con enlaces simbólicos escribe fuera del destino | 25.3 |
+| pip | CVE-2026-1703 | PYSEC-2026-1796 | *Path traversal* al instalar | 26.0 |
+| pip | CVE-2026-3219 | PYSEC-2026-2875 | Un `tar` concatenado con un ZIP se interpreta como ZIP | 26.1 |
+| pip | CVE-2026-6357 | PYSEC-2026-2876 | Carga funcionalidad fuera de su esfera de control | 26.1 |
+| pip | CVE-2026-8643 | PYSEC-2026-196 | `console_scripts` puede escribir fuera del directorio de instalación | 26.1.2 |
+| pip | CVE-2026-13346 | PYSEC-2026-3721 | Una URL doblemente codificada instala archivos en cualquier ruta | 26.2 |
+| pytest | CVE-2025-71176 | PYSEC-2026-1845 | Manejo inseguro de `tmpdir` → **H-6** | 9.0.3 |
+
+Ninguno de estos se ejecuta mientras la aplicación atiende peticiones: pip y setuptools solo actúan **al instalar** paquetes, y pytest, **al correr las pruebas**. Por eso su riesgo real era bajo, aunque varios figuren como *high*. Aun así, todos quedaron corregidos.
 
 **Medida correctiva:** se reinstaló el venv desde los archivos fijados (0 CVE) y se agregó [tests/test_dependencias.py](tests/test_dependencias.py), que falla si el entorno no coincide con los *pins* o si Starlette es menor que 1.3. Evidencia: [antes](docs/evidencias/antes/pip-audit-venv-local-antes.txt) → [después](docs/evidencias/despues/pip-audit-venv-local-despues.txt).
 
 ![CVE del venv local y si afectan a la aplicación](docs/img/sca-venv-local-cves.png)
 
-### 6.2 Decisiones sobre las propuestas de Dependabot (diapositiva 15)
+### 6.2 Cómo se identifica qué CVE afecta a la aplicación
+
+Las herramientas de SCA no muestran el CVE directamente: pip-audit da un ID de la base **PyPI/OSV** (`PYSEC-…`) o de **GitHub** (`GHSA-…`). Un mismo fallo tiene varios nombres (*aliases*). Para pasar de «la dependencia es vulnerable» a «nuestro código es explotable», se siguieron cuatro pasos:
+
+1. **Detectar y obtener el CVE.** La opción `--aliases on` agrega una columna con los otros nombres del aviso. Dependabot alerts (pestaña *Security*) muestra lo mismo, con el CVE y el GHSA en cada alerta.
+
+   ```bash
+   pip-audit -r app/requirements.txt --aliases on
+   ```
+   ```
+   Name       Version ID              Fix    Aliases
+   starlette  0.38.6  PYSEC-2026-161  1.0.1  GHSA-86qp-5c8j-p5mr, X41-2026-002, CVE-2026-48710
+   ```
+
+2. **Leer el aviso.** Con cualquiera de los IDs se consulta:
+
+   | Fuente | URL de ejemplo | Qué aporta |
+   |---|---|---|
+   | OSV.dev | `https://osv.dev/vulnerability/PYSEC-2026-161` | Alias, **rango de versiones afectado** (`introduced 0`, `fixed 1.0.1`) y descripción técnica |
+   | GitHub Advisory Database | `https://github.com/advisories/GHSA-86qp-5c8j-p5mr` | Severidad, **CVSS**, **CWE** y paquetes afectados |
+   | NVD (NIST) | `https://nvd.nist.gov/vuln/detail/CVE-2026-48710` | Ficha oficial del CVE, CVSS y referencias |
+
+   También se puede consultar por API, sin navegador: `curl https://api.osv.dev/v1/vulns/PYSEC-2026-161`.
+
+3. **Comprobar si el código usa la parte afectada.** La descripción de cada aviso nombra la API vulnerable. Se buscó cada una en `app/`:
+
+   ```bash
+   grep -rnE "request\.url|url\.hostname|StaticFiles|HTTPEndpoint|request\.form\(|UploadFile" app/
+   ```
+
+   Antes de la corrección, `request.url.path` aparecía en **3 sitios**: dos que escriben la ruta en el audit log y la decisión entre `login_failed` y `refresh_failed`. Las demás APIs, en **0** sitios. Así, de 7 avisos de Starlette solo quedó un candidato: CVE-2026-48710.
+
+4. **Demostrarlo en el entorno propio.** [validar-host-header.sh](deploy/staging-local/validar-host-header.sh) envió un `Host` manipulado contra un contenedor aislado. El audit log registró `refresh_failed` en vez de `login_failed`. Con eso el aviso pasó de *vulnerable* a **explotable**, y se convirtió en el hallazgo **H-3** ([§8](#8-pentest-controlado-host-header-y-audit-log-h-3)).
+
+> **Vulnerable** significa que la versión instalada está dentro del rango afectado. **Explotable** significa que, además, el código usa la parte afectada y se demostró con una prueba. Solo los explotables se tratan como hallazgos de la aplicación; el resto se corrige igual, pero con prioridad baja.
+
+Los hallazgos que no vienen de una dependencia (H-1, H-4, H-5, H-7 y H-8) **no tienen CVE**: un CVE identifica una falla publicada en un producto de terceros, y estos son errores de configuración o código propio. Para ellos se usa el **CWE**, que clasifica el tipo de debilidad ([§9](#9-matriz-de-hallazgos-y-priorización)).
+
+### 6.3 Decisiones sobre las propuestas de Dependabot (diapositiva 15)
 
 | PR | Propuesta | ¿Se usa la ruta? | ¿Corrige un CVE? | ¿Rompe pruebas? | Decisión |
 |---|---|---|---|---|---|
@@ -276,6 +374,10 @@ pip-audit sobre el entorno virtual local encontró **35 vulnerabilidades** (Star
 | #9 | pytest 9.0.3 → 9.2.0 | Solo desarrollo | No | No (CI en verde) | Fusionar |
 | #10 | uvicorn 0.40 → 0.54 | Sí (servidor ASGI) | No | No (CI en verde, incluida la regresión de H-3) | Validado también con DAST ([§11.3](#113-validación-de-las-actualizaciones-de-dependabot-10-y-11)): sin cambios → **se aprueba** |
 | #11 | fastapi 0.142 → 0.162 | Sí (arrastra Starlette, base de H-3) | No | No | Igual que #10: DAST sin cambios → **se aprueba** |
+
+*Figura 10. PRs de Dependabot: fusionados (#1, #3, #4 y #9), cerrados tras el triage (#2, #7 y #8) y en revisión (#10 y #11).*
+
+![PRs abiertos por Dependabot](docs/img/15-dependabot-prs.png)
 
 Corrección de H-8:
 
@@ -287,10 +389,14 @@ Corrección de H-8:
       - dependency-name: httpx
 ```
 
-### 6.3 Otros hallazgos SCA
+### 6.4 Otros hallazgos SCA
 
-- **H-6:** pytest 8.4.2 tenía PYSEC-2026-1845. Se actualizó a `pytest==9.0.3` tras comprobar que toda la suite pasa, y la CI ahora audita también `requirements-dev.txt`.
+- **H-6:** pytest 8.4.2 tenía PYSEC-2026-1845 (**CVE-2025-71176**, manejo inseguro de `tmpdir`). Se actualizó a `pytest==9.0.3` tras comprobar que toda la suite pasa, y la CI ahora audita también `requirements-dev.txt`.
 - **Dependency Review** frena en cada PR cualquier dependencia nueva con una vulnerabilidad moderada o mayor. En un *push* aparece como *skipped* a propósito, porque no hay un PR contra el cual comparar.
+
+*Figura 11. Dependabot alerts: 0 alertas de malware abiertas en las dependencias.*
+
+![Alertas de Dependabot](docs/img/13-dependabot-alertas.png)
 
 ---
 
@@ -308,6 +414,10 @@ GitHub Actions **no alcanza la VM**, que está en una NAT privada (`192.168.61.0
 | Después, en CI ([run 40792582162](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/40792582162)) | 0 FAIL · 7 WARN · 61 PASS | Solo 10202 (falsa alarma F-3) | [informe-zap.html](docs/evidencias/ci/informe-zap/informe-zap.html) |
 | Después del PR #6 ([run 42891157649](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/42891157649)) | Igual | Solo 10202 | [informe-zap-final](docs/evidencias/ci/informe-zap-final/informe-zap.html) |
 | **Con la puerta de regresión** ([run 42950461992](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/42950461992)) | `FAIL-NEW: 0 · WARN-NEW: 6 · IGNORE: 1 · PASS: 61` | 10202 → IGNORE justificado | [zap-puerta-verde.md](docs/evidencias/mejoras/zap-puerta-verde.md) |
+
+*Figura 12. DAST staging #7 sobre `main` (commit `5334eab`) en verde: 0 altas y 1 media, que es la 10202 (F-3, en IGNORE).*
+
+![DAST staging en verde sobre main](docs/img/09-dast-verde.png)
 
 ### 7.3 H-4: CSP sin `form-action` ni `base-uri` (ZAP 10055)
 
@@ -336,6 +446,10 @@ def test_every_csp_declares_directives_without_fallback():
         assert {"form-action", "base-uri", "frame-ancestors"} <= directives, csp
 ```
 
+*Figura 13. Diff del PR #5 en `app/main.py`: la constante `API_CSP` agrega `form-action` y `base-uri` a la CSP de la API.*
+
+![Diff de la corrección de H-4](docs/img/18b-pr5-diff-h4-csp.png)
+
 ### 7.4 Del informe a la puerta: `.zap/rules.tsv`
 
 El kit pide usar `-I` en el primer laboratorio y *"cambiar a un control estricto cuando haya triage"*. Con el triage hecho, [.zap/rules.tsv](.zap/rules.tsv) convierte el DAST en una **puerta de regresión**:
@@ -356,13 +470,19 @@ El kit pide usar `-I` en el primer laboratorio y *"cambiar a un control estricto
 zap-baseline.py -t "$TARGET" -c rules.tsv -r informe-zap.html -J informe-zap.json -w informe-zap.md -I
 ```
 
+*Figura 14. `.zap/rules.tsv`: las reglas en FAIL (puerta de regresión) y la falsa alarma F-3 en IGNORE.*
+
+![Reglas de la puerta de ZAP](docs/img/26-zap-rules.png)
+
 Con `-I`, los WARN siguen sin romper el build, pero **un FAIL sí lo rompe**. Las alertas informativas restantes (10015, 10027, 10031, 10049, 10109 y 10111) se revisaron y se explican en [REPORTE_HALLAZGOS.md](docs/REPORTE_HALLAZGOS.md).
 
 ---
 
 ## 8. Pentest controlado: Host header y audit log (H-3)
 
-**Hipótesis.** El audit log y la decisión entre `login_failed` y `refresh_failed` usan `request.url.path`. Starlette construye esa URL con la cabecera **`Host`**, que controla el cliente. Con Starlette < 1.3, un `Host: lab/auth/refresh?` debería cambiar la ruta registrada.
+**CVE de origen:** [CVE-2026-48710](https://nvd.nist.gov/vuln/detail/CVE-2026-48710) («BadHost», PYSEC-2026-161, GHSA-86qp-5c8j-p5mr; CVSS 3.1: 6.5, media; CWE-444). Afecta a Starlette hasta la 1.0.1. Cómo se llegó a él: [§6.2](#62-cómo-se-identifica-qué-cve-afecta-a-la-aplicación).
+
+**Hipótesis.** El audit log y la decisión entre `login_failed` y `refresh_failed` usan `request.url.path`. Starlette construye esa URL con la cabecera **`Host`**, que controla el cliente. Con Starlette < 1.0.1, un `Host: lab/auth/refresh?` debería cambiar la ruta registrada. (`test_dependencias.py` exige Starlette ≥ 1.3, que además corrige CVE-2026-54282, del mismo origen.)
 
 **Validación inocua.** Un login con cuerpo inválido (`{roto`) en un contenedor aislado, sin cuentas reales. El procedimiento es reproducible con [deploy/staging-local/validar-host-header.sh](deploy/staging-local/validar-host-header.sh):
 
@@ -393,6 +513,10 @@ docker run --rm -e OLD=1 -v "$PWD:/src:ro" -w /src python:3.12-slim bash deploy/
 +        action = "refresh_failed" if request.scope["path"] == "/auth/refresh" else "login_failed"
 ```
 
+*Figura 15. Diff del PR #5 en `app/main.py`: `route_path()` usa `scope["path"]` en lugar de `request.url.path`.*
+
+![Diff de la corrección de H-3](docs/img/18-pr5-diff-h3.png)
+
 **Después** ([validar-host-header-despues.txt](docs/evidencias/despues/validar-host-header-despues.txt)), **incluso con Starlette 0.38.6 vulnerable**:
 
 ```json
@@ -401,6 +525,10 @@ docker run --rm -e OLD=1 -v "$PWD:/src:ro" -w /src python:3.12-slim bash deploy/
 ```
 
 A través de Nginx, el mismo `Host` recibe **400** y no llega a la app ([host-header-nginx.txt](docs/evidencias/despues/host-header-nginx.txt)).
+
+*Figura 16. Antes (izquierda) y después (derecha): la línea 6 pasa de `refresh_failed` a `login_failed` con el mismo `Host` malicioso.*
+
+![Comparación del audit log antes y después de H-3](docs/img/24-h3-antes-despues.png)
 
 **Prueba de regresión.** Se comprobó que **falla con el código anterior** ([regresion-host-codigo-antes.txt](docs/evidencias/antes/regresion-host-codigo-antes.txt)):
 
@@ -423,22 +551,22 @@ E       AssertionError: assert ('refresh_failed' == 'login_failed'
 
 Riesgo = **probabilidad × impacto**, en escala 1–3 (1–2 bajo, 3–4 medio, 6–9 alto). La severidad de la herramienta **no** decide sola: cuenta el contexto.
 
-| ID | Herramienta | Hallazgo | CIA | P×I | Riesgo | Decisión | Evidencia |
-|---|---|---|---|---|---|---|---|
-| **H-1** | CI / gitleaks | gitleaks fallaba en los PR (403) | I | 3×2 | **Alto** | ✅ Corregido (`009b919`) | runs #12 y #18 |
-| **H-3** | Pentest + SCA | `Host` manipulado falsea el audit log | **I** | 2×3 | **Alto** | ✅ Corregido (`5bac705`) | [antes](docs/evidencias/antes/validar-host-header-antes.txt) → [después](docs/evidencias/despues/validar-host-header-despues.txt) |
-| **H-2** | pip-audit | Starlette 0.38.6 con 35 CVE en el venv | C/I/D | 1×3 | Medio | ✅ Corregido | [antes](docs/evidencias/antes/pip-audit-venv-local-antes.txt) → [después](docs/evidencias/despues/pip-audit-venv-local-despues.txt) |
-| **H-5** | Semgrep | Dependabot sin `cooldown` | I | 1×3 | Medio | ✅ Corregido | [semgrep-antes.json](docs/evidencias/antes/semgrep-antes.json) |
-| **H-8** | Revisión manual | PRs duplicados de Dependabot | I | 3×1 | Medio | ✅ Corregido (PR #12) | PRs #7 y #8 |
-| **H-4** | ZAP 10055 | CSP sin `form-action` ni `base-uri` | I | 1×2 | Bajo | ✅ Corregido + puerta DAST | [zap-antes.json](docs/evidencias/antes/zap-antes.json) → [csp-despues.txt](docs/evidencias/despues/csp-despues.txt) |
-| **H-7** | CodeQL #1 | La prueba no detectaba `</script >` | I | 1×2 | Bajo | ✅ Corregido (PR #6) | alerta #1 *fixed* |
-| **H-6** | pip-audit | pytest 8.4.2 con un CVE | I | 1×1 | Bajo | ✅ Corregido | — |
-| F-1 | Semgrep | SQL formateado en `ALTER TABLE` | — | — | — | ⚪ Falsa alarma (constante) | `nosemgrep` justificado |
-| F-2 | Semgrep | Dockerfile sin `USER` | — | — | — | ⚪ Falsa alarma (procesos sin privilegios) | — |
-| F-3 | ZAP 10202 | Formulario sin token anti-CSRF | — | — | — | ⚪ Falsa alarma (Bearer, sin cookies) | IGNORE en rules.tsv |
-| F-4 | gitleaks | 13 coincidencias en el historial | — | — | — | ⚪ Falsas alarmas (claves de prueba) | `.gitleaksignore` |
-| F-5 | CodeQL #3 | Log injection | — | — | — | ⚪ Falsa alarma (con prueba) | test nuevo |
-| F-6 | CodeQL #2 | El secreto TOTP se imprime | C | 1×3 | Medio | 🟡 Riesgo aceptado | *Won't fix* |
+| ID | Herramienta | Hallazgo | CVE / CWE | CIA | P×I | Riesgo | Decisión | Evidencia |
+|---|---|---|---|---|---|---|---|---|
+| **H-1** | CI / gitleaks | gitleaks fallaba en los PR (403) | Sin CVE (configuración del CI) | I | 3×2 | **Alto** | ✅ Corregido (`009b919`) | runs #12 y #18 |
+| **H-3** | Pentest + SCA | `Host` manipulado falsea el audit log | **CVE-2026-48710** | **I** | 2×3 | **Alto** | ✅ Corregido (`5bac705`) | [antes](docs/evidencias/antes/validar-host-header-antes.txt) → [después](docs/evidencias/despues/validar-host-header-despues.txt) |
+| **H-2** | pip-audit | Starlette 0.38.6, setuptools y pip viejos en el venv (35 líneas, 18 avisos) | 18 avisos ([§6.1](#61-dependencia-analizada-starlette-0386-h-2)) | C/I/D | 1×3 | Medio | ✅ Corregido | [antes](docs/evidencias/antes/pip-audit-venv-local-antes.txt) → [después](docs/evidencias/despues/pip-audit-venv-local-despues.txt) |
+| **H-5** | Semgrep | Dependabot sin `cooldown` | CWE-829 | I | 1×3 | Medio | ✅ Corregido | [semgrep-antes.json](docs/evidencias/antes/semgrep-antes.json) |
+| **H-8** | Revisión manual | PRs duplicados de Dependabot | Sin CVE (operativo) | I | 3×1 | Medio | ✅ Corregido (PR #12) | PRs #7 y #8 |
+| **H-4** | ZAP 10055 | CSP sin `form-action` ni `base-uri` | CWE-693 | I | 1×2 | Bajo | ✅ Corregido + puerta DAST | [zap-antes.json](docs/evidencias/antes/zap-antes.json) → [csp-despues.txt](docs/evidencias/despues/csp-despues.txt) |
+| **H-7** | CodeQL #1 | La prueba no detectaba `</script >` | CWE-116, CWE-185 | I | 1×2 | Bajo | ✅ Corregido (PR #6) | alerta #1 *fixed* |
+| **H-6** | pip-audit | pytest 8.4.2: manejo inseguro de `tmpdir` | CVE-2025-71176 | I | 1×1 | Bajo | ✅ Corregido | — |
+| F-1 | Semgrep | SQL formateado en `ALTER TABLE` | — | — | — | — | ⚪ Falsa alarma (constante) | `nosemgrep` justificado |
+| F-2 | Semgrep | Dockerfile sin `USER` | — | — | — | — | ⚪ Falsa alarma (procesos sin privilegios) | — |
+| F-3 | ZAP 10202 | Formulario sin token anti-CSRF | — | — | — | — | ⚪ Falsa alarma (Bearer, sin cookies) | IGNORE en rules.tsv |
+| F-4 | gitleaks | 13 coincidencias en el historial | — | — | — | — | ⚪ Falsas alarmas (claves de prueba) | `.gitleaksignore` |
+| F-5 | CodeQL #3 | Log injection | — | — | — | — | ⚪ Falsa alarma (con prueba) | test nuevo |
+| F-6 | CodeQL #2 | El secreto TOTP se imprime | — | C | 1×3 | Medio | 🟡 Riesgo aceptado | *Won't fix* |
 
 **Orden de corrección:** primero H-1 (el control de secretos estaba ciego) y H-3 (el activo más crítico), aunque H-2 tenía CVE *high*: con el contexto, su alcance real era menor. El detalle está en [docs/REPORTE_HALLAZGOS.md §2.1](docs/REPORTE_HALLAZGOS.md).
 
@@ -456,6 +584,18 @@ Riesgo = **probabilidad × impacto**, en escala 1–3 (1–2 bajo, 3–4 medio, 
 | [#17](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/pull/17) | ZAP como puerta de regresión (`.zap/rules.tsv`) | ✅ |
 
 Cada PR lleva el checklist del kit ([docs/CHECKLIST_PR.md](docs/CHECKLIST_PR.md)), que también es la plantilla de PR del repositorio.
+
+*Figura 17. PR #5 fusionado: la tabla de hallazgos corregidos con su prueba de regresión.*
+
+![PR #5 fusionado](docs/img/16-pr5-checks.png)
+
+*Figura 18. PR #6 fusionado con 12 checks y el checklist de seguridad completo.*
+
+![PR #6 con el checklist de seguridad](docs/img/17-pr6-checks.png)
+
+*Figura 19. Pruebas en local: `269 passed, 2 skipped`. Las 2 omitidas prueban scripts Bash y se ejecutan en la CI (Ubuntu). La advertencia es una deprecación de `httpx` en el cliente de pruebas.*
+
+![Resultado de pytest en local](docs/img/25-pytest.png)
 
 ---
 
@@ -476,6 +616,14 @@ La pregunta final de la clase fue: *¿qué demuestra seguridad?* No basta con mo
 | **pytest** ([run 42950911218](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/42950911218)) | ❌ `test_every_csp_declares_directives_without_fallback` → `AssertionError: default-src 'none'; frame-ancestors 'none'` (y `test_frontend_csp_only_in_its_location`) |
 | **Ruleset** | 🔒 PR en estado **BLOCKED**: el check obligatorio *Pruebas automatizadas* falló. El DAST manual la atrapa además en tiempo de ejecución: **dos capas independientes** |
 
+*Figura 20. PR #16 bloqueado: el check obligatorio de pruebas falló.*
+
+![PR #16 bloqueado](docs/img/22-pr16-bloqueado.png)
+
+*Figura 21. DAST staging #4 sobre `demo/regresion-csp`: el workflow falla por la regla 10055 en FAIL.*
+
+![DAST en rojo por la regresión de la CSP](docs/img/23-dast-rojo.png)
+
 ### 11.2 Inyección SQL nueva ([PR #15](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/pull/15))
 
 ```python
@@ -494,6 +642,22 @@ def demo_alerts_by_ip(ip: str, analyst: Analyst = Depends(require_analyst)):
 | **pytest** ([run 42950880980](https://github.com/Valero25/FDSI_LAB_Aplicacion-web-publica-por-HTTP-construir-atacar-detectar-corregir-y-verificar/actions/runs/42950880980)) | ❌ `test_auth_scope_is_derived_from_the_route_dependencies`: toda ruta nueva debe declararse en el inventario de autorización. Es una invariante de arquitectura que también la detecta |
 | **Bandit** | ✅ No la bloquea: B608 es severidad *medium* y la puerta solo corta en *high*. Por eso conviene tener varias herramientas |
 | **Ruleset** | 🔒 PR **BLOCKED**: 3 checks obligatorios en rojo (CodeQL, Semgrep y pytest) |
+
+*Figura 22. PR #15 bloqueado: CodeQL, pytest y Semgrep, los tres obligatorios, en rojo.*
+
+![PR #15 bloqueado](docs/img/19-pr15-bloqueado.png)
+
+*Figura 23. CodeQL comenta en el PR la línea 1091 (`SQL query built from user-controlled sources`, High) y propone la consulta parametrizada.*
+
+![Alerta de CodeQL en el diff del PR #15](docs/img/20-pr15-codeql.png)
+
+*Figura 24. El check de code scanning falla con "1 new alert including 1 high severity security vulnerability".*
+
+![Check de CodeQL del PR #15](docs/img/20b-pr15-codeql-check.png)
+
+*Figura 25. Log de Semgrep en el PR #15: `sqlalchemy-execute-raw-query` **❰❰ Blocking ❱❱** en la línea 1091, `Findings: 1 (1 blocking)` y `exit code 1`.*
+
+![Log de Semgrep bloqueando el PR #15](docs/img/21-pr15-semgrep.png)
 
 **Lectura:** tres herramientas distintas, con técnicas distintas (flujo de datos, patrones e invariantes de pruebas), detectan la misma vulnerabilidad. Ninguna persona del equipo podía fusionarla, ni siquiera el administrador, porque la lista de bypass está vacía.
 
@@ -526,7 +690,7 @@ Antes de decidir sobre las actualizaciones de producción, se ejecutó el DAST s
 1. **Un check verde no significa una aplicación segura.** La seguridad la demuestra el ciclo completo: **detectar → entender → corregir → volver a comprobar**, y además demostrar que el control se pone en rojo cuando debe (§11).
 2. **Cada herramienta ve una capa distinta.** SAST encontró configuración y código (H-5, H-7), SCA encontró dependencias (H-2, H-6), DAST encontró cabeceras (H-4), y el hallazgo más grave (H-3) salió de **unir un CVE de SCA con una validación manual**.
 3. **Casi la mitad de los resultados fueron falsas alarmas** (6 de 14). Justificarlas con algo verificable (una prueba, una huella, un `nosemgrep` comentado o un IGNORE en `rules.tsv`) vale tanto como corregir, y evita la tentación de apagar el escáner.
-4. **Que una dependencia sea vulnerable no implica que el código sea explotable.** De 35 CVE, solo uno era alcanzable, y se corrigió **en el código**, para no depender de la versión de Starlette.
+4. **Que una dependencia sea vulnerable no implica que el código sea explotable.** De 18 avisos distintos (35 líneas de pip-audit), solo uno era alcanzable, **CVE-2026-48710**, y se corrigió **en el código**, para no depender de la versión de Starlette.
 5. **El pipeline también es superficie de ataque:** permisos mínimos, acciones fijadas por SHA, `cooldown` de Dependabot y un ruleset sin excepciones.
 6. **Las decisiones de riesgo se documentan, no se esconden:** publicar el repositorio deshizo parte de G12. Se aceptó con un análisis P×I y controles compensatorios.
 
