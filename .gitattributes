@@ -7,3 +7,4 @@ deploy/** text eol=lf
 nginx/** text eol=lf
 scripts/** text eol=lf
 frontend/** text eol=lf
+.zap/** text eol=lf
